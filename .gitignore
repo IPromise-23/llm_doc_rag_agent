@@ -21,3 +21,8 @@ experiments/
 *api_key*
 auth.json
 credentials.json
+*.key
+*.pem
+*.crt
+*.p12
+*.pfx
