@@ -1,0 +1,2 @@
+question,ground_truth,,,,,
+What does the MVP expose?,CLI commands for ingest, query, retrieve, sources, chunks, and eval.

@@ -1,0 +1,28 @@
+# Local secrets and credentials
+.env
+*.env
+*.key
+*.pem
+*.crt
+*.p12
+*.pfx
+auth.json
+
+# Generated local state
+.DS_Store
+__pycache__/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+data/indexes/
+experiments/
+
+# Large or binary-ish artifacts that should be selected explicitly later
+*.bin
+*.sqlite
+*.sqlite3
+*.db
+*.parquet
+*.zip
+*.tar
+*.gz

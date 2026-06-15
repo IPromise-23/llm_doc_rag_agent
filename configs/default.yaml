@@ -1,0 +1,31 @@
+project_root: .
+qdrant_path: data/indexes/qdrant
+default_collection: llm_doc_rag
+embedding_provider: sentence_transformers
+embedding_model: BAAI/bge-small-en-v1.5
+embedding_device: mps
+chunk_size: 900
+chunk_overlap: 120
+top_k: 5
+retriever_type: dense
+candidate_k:
+reranker_model:
+eval_retrievers:
+  - dense
+max_rewrites: 1
+min_relevance_score: 0.05
+min_relevant_chunks: 1
+min_grounded_overlap: 0.2
+run_ragas: false
+ragas_metrics:
+  - faithfulness
+  - answer_relevancy
+  - context_precision
+  - context_recall
+ragas_model:
+ragas_base_url:
+ragas_max_tokens: 4096
+ragas_top_p: 0.1
+ragas_disable_thinking: true
+llm_model: deepseek-chat
+llm_base_url: https://api.deepseek.com

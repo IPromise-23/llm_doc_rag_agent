@@ -1,0 +1,23 @@
+.env
+.env.*
+!.env.example
+.DS_Store
+.vscode/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+build/
+dist/
+data/indexes/
+experiments/
+
+# Local secrets and auth material
+*secret*
+*token*
+*apikey*
+*api_key*
+auth.json
+credentials.json

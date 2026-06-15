@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "llm-doc-rag-agent"
+version = "0.1.0"
+description = "A local technical-document RAG agent with Qdrant, configurable LLMs, CLI, API, evaluation, and LangGraph orchestration."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "qdrant-client>=1.18",
+  "typer>=0.12",
+  "pydantic>=2",
+  "pydantic-settings>=2",
+  "openai>=1",
+  "sentence-transformers>=3",
+  "langgraph>=0.2",
+  "PyYAML>=6",
+]
+
+[project.optional-dependencies]
+api = ["fastapi>=0.115", "uvicorn>=0.30"]
+pdf = ["pypdf>=5"]
+test = ["pytest>=8"]
+eval = ["ragas>=0.2", "pandas>=2"]
+
+[project.scripts]
+llm-doc-rag = "llm_doc_rag_agent.cli:app"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
