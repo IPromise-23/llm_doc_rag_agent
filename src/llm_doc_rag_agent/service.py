@@ -21,7 +21,7 @@ from llm_doc_rag_agent.schemas import Answer, Chunk
 from llm_doc_rag_agent.vectorstores import QdrantVectorStore
 
 
-class _ConfiguredRetriever:
+class _ConfiguredRetriever: # 适配 graph.py
     """Late-bound retriever adapter so graph routing can skip retrieval entirely."""
 
     def __init__(self, service: "RagService", retriever_type: str, candidate_k: int | None) -> None:
@@ -29,7 +29,7 @@ class _ConfiguredRetriever:
         self.retriever_type = retriever_type
         self.candidate_k = candidate_k
 
-    def retrieve(self, query: str, top_k: int = 5):
+    def retrieve(self, query: str, top_k: int = 5): # 给 graph 调用的统一接口，把请求转交给 RagService.retrieve_only() , 并附带当前配置的 retriever_type && candidate_k
         return self.service.retrieve_only(
             question=query,
             top_k=top_k,
@@ -60,10 +60,10 @@ class RagService:
         self._qa: QAService | None = None
         self._quality_grader: RuleBasedQualityGrader | None = None
 
-    @property
+    @property   # 懒加载语法，让方法像属性一样使用，外部可以写 service.store
     def store(self) -> QdrantVectorStore:
         if self._store is None:
-            self._store = QdrantVectorStore(
+            self._store = QdrantVectorStore(    # 第一次访问时创建 Qdrant store ,之后重复使用同一个对象
                 path=self.settings.resolved_qdrant_path,
                 collection=self.collection,
             )
@@ -120,8 +120,8 @@ class RagService:
             )
         return self._quality_grader
 
-    def ingest_path(self, path: str | Path, recreate: bool = False, batch_size: int = 64) -> dict[str, Any]:
-        documents = self.loader.load_path(path)
+    def ingest_path(self, path: str | Path, recreate: bool = False, batch_size: int = 64) -> dict[str, Any]:    # 把本地文件或者目录入库
+        documents = self.loader.load_path(path)     # 加载文档，得到 Docunment 列表
         if not documents:
             return {
                 "collection": self.collection,
@@ -133,19 +133,19 @@ class RagService:
                 "deleted_chunks": 0,
                 "qdrant_path": str(self.settings.resolved_qdrant_path),
             }
-        if recreate or not self.store.collection_exists():
-            self.store.vector_size = self.embeddings.vector_size
+        if recreate or not self.store.collection_exists():          # 如果要求重建或者 collection 不存在，就确保 Qdrant collection 存在
+            self.store.vector_size = self.embeddings.vector_size    # 需要设置 vector_size ，因为 Qdrant collection 需要知道向量维度
             self.store.ensure_collection(recreate=recreate)
-        changed_documents = []
+        changed_documents = []  # 需要重新入库的 document 列表
         skipped_documents = 0
         deleted_chunks = 0
         for document in documents:
-            document_hash = str(document.metadata.get("document_hash", ""))
-            existing_hashes = set() if recreate else self.store.source_content_hashes(document.source_path)
-            if existing_hashes == {document_hash}:
-                skipped_documents += 1
-                continue
-            if existing_hashes:
+            document_hash = str(document.metadata.get("document_hash", ""))                                 # 拿到每个文档的 hash ，表示当前本地文档内容的 hash ，是 loader 读取当前文件时根据该文件内容算出来的哈希值
+            existing_hashes = set() if recreate else self.store.source_content_hashes(document.source_path) # 查 collection 中这个 source 已有的 hash   source 代表原始文档来源（路径），一般是源文件路径
+            if existing_hashes == {document_hash}:                                                          # 这里主要是想判断：这个文件这次读取到的内容，是否和以前入库时的内容是一样的？
+                skipped_documents += 1                                                                      # 如果库里这个 source 的 hash 正好等于当前文件内容 hash ，说明该文件没有变化，不需要重新 chunk / embedding / rewrite into Qdrant
+                continue                                                                                    # hash 相等就直接进入下一个循环，只有不等才会在循环内继续
+            if existing_hashes:                                                                             # 不相等且库中已有当前 source 的 hash ，就要先删除旧的 chunks ，再把新文档加入待重新入库列表中
                 deleted_chunks += self.store.delete_source(document.source_path)
             changed_documents.append(document)
         chunks = self.splitter.split_documents(changed_documents)
@@ -163,19 +163,19 @@ class RagService:
         }
 
     def reindex_source(self, path: str | Path, batch_size: int = 64) -> dict[str, Any]:
-        source = Path(path).expanduser().resolve()
-        deleted = self.delete_source(str(source))
-        result = self.ingest_path(source, recreate=False, batch_size=batch_size)
+        source = Path(path).expanduser().resolve()                                  # 路径标准化，expanduser() 处理 ~ ，resolve() 转成绝对路径
+        deleted = self.delete_source(str(source))                                   # 删除这个 source 在 Qdrant 中已有的 chunks
+        result = self.ingest_path(source, recreate=False, batch_size=batch_size)    # 重新读取这个路径下的文件并入库
         result["deleted_before_reindex"] = deleted
         return result
 
     def delete_source(self, source_path: str) -> int:
         return self.store.delete_source(source_path)
 
-    def inspect_collection(self) -> dict[str, Any]:
+    def inspect_collection(self) -> dict[str, Any]:     # 返回 collection 状态，用于诊断
         return self.store.inspect_collection()
 
-    def query(
+    def query(                                          # 问答入口，用户查询的主入口
         self,
         question: str,
         top_k: int | None = None,
@@ -187,18 +187,18 @@ class RagService:
         effective_retriever = retriever_type or self.settings.retriever_type
         effective_candidate_k = candidate_k if candidate_k is not None else self.settings.candidate_k
         if use_graph:
-            graph = build_rag_graph(
+            graph = build_rag_graph(                                        # # graph = build_rag_graph() 把当前服务能力注入到 graph
                 _ConfiguredRetriever(self, effective_retriever, effective_candidate_k),
                 self.qa,
-                list_sources=self.list_sources,
-                chunks_for_source=self.chunks_for_source,
+                list_sources=self.list_sources,                             # 列出有哪些源文件入库了，返回源文件路径列表
+                chunks_for_source=self.chunks_for_source,                   # 按某个源文件路径取回它的 chunks
                 quality_grader=self.quality_grader,
                 max_rewrites=self.settings.max_rewrites,
                 min_relevance_score=self.settings.min_relevance_score,
                 min_relevant_chunks=self.settings.min_relevant_chunks,
                 min_grounded_overlap=self.settings.min_grounded_overlap,
             )
-            state = graph.invoke(
+            state = graph.invoke(                                           # 执行图，graph.invoke(...) 返回最终 state
                 {
                     "question": question,
                     "top_k": effective_top_k,
@@ -218,7 +218,7 @@ class RagService:
                 contexts=answer.contexts,
                 trace=trace,
             )
-        retrieved = self.retrieve_only(
+        retrieved = self.retrieve_only(         # 不使用 graph ，只是用简单链路
             question,
             top_k=effective_top_k,
             retriever_type=effective_retriever,
@@ -249,10 +249,10 @@ class RagService:
             candidate_k=candidate_k if candidate_k is not None else self.settings.candidate_k,
         )
 
-    def list_sources(self, limit: int | None = 200) -> list[str]:
+    def list_sources(self, limit: int | None = 200) -> list[str]:   # 列出有哪些源文件入库了，返回源文件路径列表
         return self.store.list_sources(limit=limit)
 
-    def chunks_for_source(self, source_path: str, limit: int | None = 100) -> list[Chunk]:
+    def chunks_for_source(self, source_path: str, limit: int | None = 100) -> list[Chunk]:  # 按某个源文件路径取回它的 chunks
         return self.store.chunks_for_source(source_path=source_path, limit=limit)
 
     def close(self) -> None:

@@ -98,29 +98,29 @@ class QdrantVectorStore:
         }
         return {value for value in hashes if value}
 
-    def delete_source(self, source_path: str) -> int:
-        if not self.collection_exists():
+    def delete_source(self, source_path: str) -> int:   # 一个源文件 source_path 入库后，不是作为一个整体存在 Qdrant 中，而是被切分为多个 Chunk ，随后每一个 Chunk 都会变成 Qdrant 中的一个 point
+        if not self.collection_exists():                # 这个函数是 删除所有由 payload["source_path"] 指定的 source_path 的所有 points ，返回值 int 表示删除前匹配到的 point 数量，即这个 source 对应的 chunk 数量     简单来说，本函数删除某个源文件对应的所有 chunks
             return 0
         self.ensure_collection()
-        deleted = self.count_source(source_path)
+        deleted = self.count_source(source_path)        # 数一下这个 source_path 下当前有多少个 point 在库里
         if deleted == 0:
             return 0
         self.client.delete(
-            collection_name=self.collection,
-            points_selector=models.FilterSelector(filter=self._source_filter(source_path)),
+            collection_name=self.collection,            # 指定 collection
+            points_selector=models.FilterSelector(filter=self._source_filter(source_path)), # 删除所有满足这个过滤条件的 points
         )
         return deleted
 
-    def count_source(self, source_path: str) -> int:
+    def count_source(self, source_path: str) -> int:    # 统计某个源文件当前在 Qdrant collection 中有多少的 point
         if not self.collection_exists():
             return 0
         self.ensure_collection()
-        result = self.client.count(
-            collection_name=self.collection,
-            count_filter=self._source_filter(source_path),
+        result = self.client.count(                         # 调用 Qdrant 的 count() API
+            collection_name=self.collection,                # 指定在哪个 collection 中数
+            count_filter=self._source_filter(source_path),  # 指定过滤条件，只统计某个 source 的 points
             exact=True,
         )
-        return int(result.count)    # .count 是 Qdrant 返回对象里的数量字段
+        return int(result.count)    # .count 是 Qdrant 返回对象里的数量字段     Qdrant 返回的 result 不是普通整数，而是一个结果对象，数量在它的 .count 字段中
 
     def inspect_collection(self) -> dict[str, Any]: # 查看 collection 的概览信息，诊断/查看状态，返回 dict ，展示当前 collection 的基本情况
         self.ensure_collection()
