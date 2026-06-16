@@ -138,7 +138,7 @@ class EvalRunner:   # 封装基础评估流程
     def build_report(self, results: list[EvalResult]) -> str:                           # 生成 MD 简报  评估结果 -> MD str
         by_retriever: dict[str, list[EvalResult]] = defaultdict(list)                   # 如果访问一个不存在的 key ，会自动创建空列表   by_retriever["dense"].append(result) --> 初始化 {"dense":[]}，再 append(result)
         for result in results:
-            by_retriever[str(result.trace.get("retriever_type", "unknown"))].append(result) # 按照 retriever 类型分组
+            by_retriever[str(result.trace.get("retriever_type", "unknown"))].append(result) # 把结果按照 retriever 类型分组（按照检索器分组）
 
         lines = [
             "# RAG Evaluation Report",
@@ -153,7 +153,7 @@ class EvalRunner:   # 封装基础评估流程
             avg_latency = sum(float(item.trace.get("latency_seconds", 0.0)) for item in items) / max(len(items), 1) # 计算平均耗时
             lines.append(f"| {retriever} | {len(items)} | {avg_contexts:.2f} | {avg_latency:.4f} |")    # 把统计结果追加为 MD 表格行
 
-        lines.extend(
+        lines.extend(   # 这些指标是确定性词项诊断
             [
                 "",
                 "## Quality Diagnostics",
@@ -165,12 +165,12 @@ class EvalRunner:   # 封装基础评估流程
             ]
         )
         for retriever, items in sorted(by_retriever.items()):
-            metrics = [_quality_metrics(item) for item in items]
+            metrics = [_quality_metrics(item) for item in items]    # 对每个检索器下的每条结果调用 _quality_metrics() ，得到每条样本的本地质量指标
             answer_context = _average_metric(metrics, "answer_context_overlap")
             answer_ground_truth = _average_metric(metrics, "answer_ground_truth_coverage")
             context_ground_truth = _average_metric(metrics, "context_ground_truth_coverage")
-            with_ground_truth = sum(1 for metric in metrics if metric["has_ground_truth"])
-            insufficient = sum(1 for metric in metrics if metric["insufficient_answer"])
+            with_ground_truth = sum(1 for metric in metrics if metric["has_ground_truth"])  # 有 ground truth 的样本数
+            insufficient = sum(1 for metric in metrics if metric["insufficient_answer"])    # 被识别为拒答/上下文不足的样本数
             lines.append(
                 f"| {retriever} | {with_ground_truth} | {_format_ratio(answer_context)} | "
                 f"{_format_ratio(answer_ground_truth)} | {_format_ratio(context_ground_truth)} | {insufficient} |"
@@ -190,17 +190,17 @@ class EvalRunner:   # 封装基础评估流程
             question = _escape_table_cell(result.question)
             ground_truth = _escape_table_cell(_preview(result.ground_truth or ""))
             answer = _escape_table_cell(_preview(result.answer))
-            metrics = _quality_metrics(result)
+            metrics = _quality_metrics(result)  # 计算该样本的质量指标
             lines.append(
                 f"| {question} | {retriever} | {len(result.contexts)} | "
-                f"{_format_ratio(metrics['answer_context_overlap'])} | "
-                f"{_format_ratio(metrics['answer_ground_truth_coverage'])} | "
-                f"{_format_ratio(metrics['context_ground_truth_coverage'])} | "
+                f"{_format_ratio(metrics['answer_context_overlap'])} | "        # 答案是否贴近上下文
+                f"{_format_ratio(metrics['answer_ground_truth_coverage'])} | "  # 答案是否覆盖标准答案
+                f"{_format_ratio(metrics['context_ground_truth_coverage'])} | " # 检索上下文是否覆盖标准答案
                 f"{ground_truth} | {answer} |"
             )
-        issue_rows = _quality_issue_rows(results)
-        lines.extend(["", "## Potential Issues", ""])
-        if issue_rows:
+        issue_rows = _quality_issue_rows(results)       # 找可疑样本，遍历所有 EvalResult ，给每条样本打问题标签
+        lines.extend(["", "## Potential Issues", ""])   # 生成潜在问题列表
+        if issue_rows:                                  # 如果存在问题样本
             lines.extend(
                 [
                     "| Question | Retriever | Signals | Answer Preview |",
@@ -213,7 +213,7 @@ class EvalRunner:   # 封装基础评估流程
                 answer = _escape_table_cell(_preview(result.answer))
                 lines.append(f"| {question} | {retriever} | {', '.join(signals)} | {answer} |")
         else:
-            lines.append("No obvious deterministic quality issues detected.")
+            lines.append("No obvious deterministic quality issues detected.")   # 没发现问题，但也并非说明质量好
         lines.append("")
         return "\n".join(lines) # 把所有行用换行拼成一个 MD str
 
@@ -229,27 +229,27 @@ def _escape_table_cell(text: str) -> str:   # 转义 MD 表格单元格
     return text.replace("|", "\\|").replace("\n", " ")  # MD cell 中 | 是列分隔符，如果答案里本身有 | ，表格会乱，所以要替换为 \|   换行符 -> 空格
 
 
-def _quality_metrics(result: EvalResult) -> dict[str, Any]:
+def _quality_metrics(result: EvalResult) -> dict[str, Any]:                 # 每条结果的本地质量指标
     answer_terms = set(meaningful_terms(result.answer))
     context_terms = set(meaningful_terms(" ".join(result.contexts)))
-    ground_truth_terms = set(meaningful_terms(result.ground_truth or ""))
+    ground_truth_terms = set(meaningful_terms(result.ground_truth or ""))   # 把答案、上下文、标准答案分别转成有意义词项集合
     insufficient_answer = any(
         phrase in result.answer.lower()
-        for phrase in ("不足以回答", "无法回答", "insufficient", "not enough context")
+        for phrase in ("不足以回答", "无法回答", "insufficient", "not enough context")  # 检测答案是否像是拒绝回答或者上下文不足回答
     )
     return {
         "has_ground_truth": bool(ground_truth_terms),
         "insufficient_answer": insufficient_answer,
-        "answer_context_overlap": _overlap_ratio(answer_terms, context_terms),
-        "answer_ground_truth_coverage": _overlap_ratio(ground_truth_terms, answer_terms) if ground_truth_terms else None,
-        "context_ground_truth_coverage": _overlap_ratio(ground_truth_terms, context_terms) if ground_truth_terms else None,
+        "answer_context_overlap": _overlap_ratio(answer_terms, context_terms),                                              # 答案词项中有多少出现在上下文中
+        "answer_ground_truth_coverage": _overlap_ratio(ground_truth_terms, answer_terms) if ground_truth_terms else None,   # 标准答案词项中有多少被答案覆盖
+        "context_ground_truth_coverage": _overlap_ratio(ground_truth_terms, context_terms) if ground_truth_terms else None, # 标准答案词项中有多少被检索上下文覆盖
     }
 
 
-def _quality_issue_rows(results: list[EvalResult]) -> list[tuple[EvalResult, list[str]]]:
+def _quality_issue_rows(results: list[EvalResult]) -> list[tuple[EvalResult, list[str]]]:   # 找可疑样本，遍历所有 EvalResult ，给每条样本打问题标签
     rows: list[tuple[EvalResult, list[str]]] = []
     for result in results:
-        metrics = _quality_metrics(result)
+        metrics = _quality_metrics(result)  # 对应 eval result 的本地质量指标
         signals: list[str] = []
         if metrics["insufficient_answer"]:
             signals.append("insufficient_answer")
@@ -270,7 +270,7 @@ def _overlap_ratio(source_terms: set[str], target_terms: set[str]) -> float:
     return len(source_terms & target_terms) / len(source_terms)
 
 
-def _average_metric(metrics: list[dict[str, Any]], key: str) -> float | None:
+def _average_metric(metrics: list[dict[str, Any]], key: str) -> float | None:   # 平均指标
     values = [float(metric[key]) for metric in metrics if isinstance(metric.get(key), (int, float))]
     if not values:
         return None
