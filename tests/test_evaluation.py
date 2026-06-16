@@ -109,6 +109,10 @@ def test_eval_runner_writes_markdown_report(tmp_path: Path):
     assert "| bm25 | 1 |" in text
     assert "dense answer" in text
     assert "bm25 answer" in text
+    assert "## Quality Diagnostics" in text
+    assert "These are deterministic lexical diagnostics" in text
+    assert "Truth" in text
+    assert "low_answer_ground_truth_coverage" in text
 
 
 def test_ragas_eval_runner_scores_existing_eval_results(tmp_path: Path, monkeypatch):

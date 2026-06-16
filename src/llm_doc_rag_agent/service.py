@@ -187,7 +187,7 @@ class RagService:
         effective_retriever = retriever_type or self.settings.retriever_type
         effective_candidate_k = candidate_k if candidate_k is not None else self.settings.candidate_k
         if use_graph:
-            graph = build_rag_graph(                                        # # graph = build_rag_graph() 把当前服务能力注入到 graph
+            graph = build_rag_graph(                                        # graph = build_rag_graph() 把当前服务能力注入到 graph
                 _ConfiguredRetriever(self, effective_retriever, effective_candidate_k),
                 self.qa,
                 list_sources=self.list_sources,                             # 列出有哪些源文件入库了，返回源文件路径列表
