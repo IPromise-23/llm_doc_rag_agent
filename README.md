@@ -21,7 +21,7 @@
 - 编排：LangGraph 先路由到 `source_lookup`、`direct_answer` 或 `retrieve_rag`；普通问题走 `retrieve -> grade_documents -> generate -> grade_generation`。
 - Agent 自检：规则型 CRAG gate 会判断检索上下文是否足够相关，必要时改写 query 并重试；规则型 Self-RAG trace 会记录答案 groundedness/relevance。
 - Trace：query 返回 `route`、`graph_path`、`retriever_type`、`candidate_k`、`document_grade_decision`、`answer_grounded` 等调试字段。
-- 入口：提供 CLI、可选 FastAPI、CSV/JSONL eval runner。
+- 入口：提供 CLI、可选 FastAPI、三层 CSV/JSONL eval runner。
 
 ## 目录结构
 
@@ -79,10 +79,13 @@ cd /Users/ipromise/Desktop/llm_doc_rag_agent
 安装为本地命令后可运行：
 
 ```bash
-llm-doc-rag ingest --path ./data/raw --collection my_docs
+llm-doc-rag ingest --path ./README.md --collection project_eval
+llm-doc-rag ingest --path ./docs --collection project_eval
+llm-doc-rag ingest --path ./data/raw --collection project_eval
+llm-doc-rag sources --collection project_eval
+llm-doc-rag eval-retrieval --dataset ./data/eval/questions.csv --collection project_eval
 llm-doc-rag query "这个项目如何做检索？" --collection my_docs
-llm-doc-rag sources --collection my_docs
-llm-doc-rag eval --dataset ./data/eval/questions.csv --collection my_docs
+llm-doc-rag eval --dataset ./data/eval/questions.csv --collection project_eval
 llm-doc-rag ragas-eval --dataset ./data/eval/questions.csv --collection my_docs
 ```
 
@@ -103,7 +106,8 @@ llm-doc-rag retrieve "混合检索问题" --collection my_docs --retriever hybri
 llm-doc-rag retrieve "需要精排的问题" --collection my_docs --retriever hybrid_rerank --candidate-k 20
 llm-doc-rag query "请列出当前有哪些文档" --collection my_docs
 llm-doc-rag query "查看 source=path/to/file.md 的 chunks" --collection my_docs
-llm-doc-rag eval --dataset data/eval/questions.csv --collection my_docs --retriever dense --retriever bm25 --retriever hybrid_rrf --report experiments/reports/retrieval.md
+llm-doc-rag eval-retrieval --dataset data/eval/questions.csv --collection project_eval --retriever dense --retriever bm25 --retriever hybrid_rrf --report experiments/reports/retrieval.md
+llm-doc-rag eval --dataset data/eval/questions.csv --collection project_eval --retriever dense --retriever bm25 --retriever hybrid_rrf --report experiments/reports/rag.md
 llm-doc-rag ragas-eval --dataset data/eval/questions.csv --collection my_docs --retriever dense --retriever hybrid_rrf --metric faithfulness --metric answer_relevancy
 llm-doc-rag sources --collection my_docs
 llm-doc-rag chunks --source path/to/file.md --collection my_docs
@@ -113,6 +117,59 @@ llm-doc-rag reindex-source --path path/to/file.md --collection my_docs
 llm-doc-rag eval --dataset data/eval/questions.csv --collection my_docs
 ```
 
+## 如何跑通 ingest/query/eval
+
+当前项目还没有外部业务知识库时，可以先把项目自己的 README、docs 和 smoke 文档作为评估语料入库：
+
+```bash
+conda activate llm_doc_rag
+cd /Users/ipromise/Desktop/llm_doc_rag_agent
+export PYTHONPATH=src
+
+python -m llm_doc_rag_agent.cli ingest --path README.md --collection project_eval --config configs/default.yaml
+python -m llm_doc_rag_agent.cli ingest --path docs --collection project_eval --config configs/default.yaml
+python -m llm_doc_rag_agent.cli ingest --path data/raw --collection project_eval --config configs/default.yaml
+python -m llm_doc_rag_agent.cli sources --collection project_eval --config configs/default.yaml
+```
+
+`ingest` 会写入本地 Qdrant 索引。`sources` 只读取已入库 collection。普通 `query` 和完整 `eval` 会调用配置的 LLM，因此需要 `.env` 中有 `DEEPSEEK_API_KEY`：
+
+```bash
+python -m llm_doc_rag_agent.cli query \
+  "What is the difference between eval, eval-retrieval, and ragas-eval?" \
+  --collection project_eval \
+  --config configs/default.yaml \
+  --retriever hybrid_rrf \
+  --candidate-k 20
+```
+
+三层评估的边界如下：
+
+1. `eval-retrieval`：只调用 retriever，不调用 LLM，用 `expected_sources` 检查 source 命中、rank、MRR。
+2. `eval`：调用完整 RAG/Graph 链路，比较不同 retriever 下的答案、上下文、trace 和确定性质量诊断。
+3. `ragas-eval`：在完整 RAG 结果上调用 RAGAS + judge LLM，计算 faithfulness、answer relevancy、context precision/recall 等指标。
+
+```bash
+python -m llm_doc_rag_agent.cli eval-retrieval \
+  --dataset data/eval/questions.csv \
+  --collection project_eval \
+  --config configs/default.yaml \
+  --retriever dense \
+  --retriever bm25 \
+  --retriever hybrid_rrf \
+  --report experiments/reports/retrieval.md
+
+python -m llm_doc_rag_agent.cli eval \
+  --dataset data/eval/questions.csv \
+  --collection project_eval \
+  --config configs/default.yaml \
+  --retriever dense \
+  --retriever hybrid_rrf \
+  --report experiments/reports/rag.md
+```
+
+`data/eval/questions.csv` 当前以项目自带文档为目标语料，字段包括 `question`、`ground_truth`、`expected_sources`、`expected_route`、`answerable`、`category` 和 `notes`。如果后续换成真实业务文档，先把目标文档入库，再按同样字段补充评估问题。
+
 ## 当前边界
 
 这些能力目前还没有完全工程化，后续版本会优先补齐：
@@ -120,9 +177,9 @@ llm-doc-rag eval --dataset data/eval/questions.csv --collection my_docs
 - 当前 BM25/hybrid 基于已有 chunk payload 临时计算，还没有 Qdrant named sparse vectors 和持久化 sparse 索引。
 - Reranker 已有可插拔策略入口；默认未配置 `reranker_model` 时不会加载 CrossEncoder，只做候选截断。
 - CRAG/Self-RAG 运行时 gate 默认仍是规则型轻量实现；离线评估已提供 `ragas-eval`，会复用 DeepSeek/OpenAI-compatible judge，并默认关闭 DeepSeek thinking。
-- Eval 支持重复 `--retriever` 横向比较 dense、BM25 和 hybrid RRF；RAGAS 负责离线自动质量指标，运行前需要 dataset 提供 `ground_truth`。
+- Eval 已拆成三层：`eval-retrieval` 负责不调用 LLM 的检索命中评估，`eval` 负责完整 RAG/Graph 答案评估，`ragas-eval` 负责离线自动质量指标。RAGAS 运行前需要 dataset 提供 `ground_truth`。
 - API 已有项目根目录路径限制和统一错误响应雏形，但 request id、streaming 和 collection 管理还未补齐。
-- 项目有核心单元测试，但还没有 CI、结构化日志、成本统计和完整前端。
+- 项目有核心单元测试和 GitHub Actions 测试工作流，但还没有结构化日志、成本统计和完整前端。
 
 ## 路线图
 

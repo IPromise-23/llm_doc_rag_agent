@@ -9,7 +9,7 @@ from typing import Optional
 import typer
 
 from llm_doc_rag_agent.config import get_settings                       # 从 config.py 中读取环境变量和 YAML
-from llm_doc_rag_agent.evaluation import EvalRunner, RagasEvalRunner    # 做评估
+from llm_doc_rag_agent.evaluation import EvalRunner, RagasEvalRunner, RetrievalEvalRunner    # 做评估
 from llm_doc_rag_agent.service import RagService                        # 项目主服务
 from llm_doc_rag_agent.utils import to_jsonable                         # 把 dataclass Path 复杂对象 转成可以打印的结构
 
@@ -142,8 +142,9 @@ def eval_command(
     collection: Optional[str] = typer.Option(None, "--collection", "-c"),
     config: Optional[Path] = typer.Option(None, "--config"),
     top_k: Optional[int] = typer.Option(None, "--top-k"),
-    retrievers: Optional[list[str]] = typer.Option(None, "--retriever", help="Repeat for comparison, e.g. --retriever dense --retriever bm25."),    # 参数可以是一个字符串列表
+    retrievers: Optional[list[str]] = typer.Option(None, "--retriever", help="Repeat for full RAG comparison, e.g. --retriever dense --retriever bm25."),    # 参数可以是一个字符串列表
     candidate_k: Optional[int] = typer.Option(None, "--candidate-k"),
+    no_graph: bool = typer.Option(False, "--no-graph", help="Bypass LangGraph for all retrievers during this RAG eval."),
     report: Optional[Path] = typer.Option(None, "--report", help="Write a Markdown summary report. Defaults to output path with .md suffix."),
 ) -> None:
     service = _service(collection, config)
@@ -155,6 +156,7 @@ def eval_command(
         top_k=top_k,
         retrievers=retrievers,
         candidate_k=candidate_k,
+        use_graph=not no_graph,
     )
     report_path = report or runner.default_report_path(output_path)
     runner.write_report(results, report_path)
@@ -178,6 +180,32 @@ def eval_command(
             }
         )
     print(payload)
+
+
+@app.command("eval-retrieval")
+def eval_retrieval_command(
+    dataset: Path = typer.Option(..., "--dataset"),
+    output: Optional[Path] = typer.Option(None, "--output"),
+    collection: Optional[str] = typer.Option(None, "--collection", "-c"),
+    config: Optional[Path] = typer.Option(None, "--config"),
+    top_k: Optional[int] = typer.Option(None, "--top-k"),
+    retrievers: Optional[list[str]] = typer.Option(None, "--retriever", help="Repeat for retrieval-only comparison, e.g. --retriever dense --retriever hybrid_rrf."),
+    candidate_k: Optional[int] = typer.Option(None, "--candidate-k"),
+    report: Optional[Path] = typer.Option(None, "--report", help="Write a Markdown retrieval summary report. Defaults to output path with .md suffix."),
+) -> None:
+    service = _service(collection, config)
+    runner = RetrievalEvalRunner(service)
+    output_path = output or runner.default_output_path()
+    rows = runner.run(
+        dataset_path=dataset,
+        output_path=output_path,
+        top_k=top_k,
+        retrievers=retrievers,
+        candidate_k=candidate_k,
+    )
+    report_path = report or runner.default_report_path(output_path)
+    runner.write_report(rows, report_path)
+    print({"examples": len(rows), "output": str(output_path), "report": str(report_path)})
 
 
 @app.command("ragas-eval")  # 直接跑 RAGAS 的入口   和 eval 的区别是，eval 先跑项目内部评估再按需追加 RAGAS ，而 ragas-eval 则是直接跑 RAGAS 流程

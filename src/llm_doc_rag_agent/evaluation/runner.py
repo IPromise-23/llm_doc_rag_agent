@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import csv
+import json
 import time
 from collections import defaultdict # 按 retriever 类型分组统计报告
 from datetime import datetime   # 生成默认输出文件名里的时间戳
@@ -22,29 +23,33 @@ from llm_doc_rag_agent.service import RagService
 from llm_doc_rag_agent.utils import dump_jsonl, to_jsonable
 
 
+def load_eval_dataset(path: str | Path) -> list[EvalExample]:
+    dataset_path = Path(path).expanduser().resolve()
+    if not dataset_path.exists():
+        raise FileNotFoundError(f"Eval dataset does not exist: {dataset_path}")
+    with dataset_path.open("r", encoding="utf-8-sig", newline="") as fh:
+        rows = list(csv.DictReader(fh))
+    examples = []
+    for row in rows:
+        question = (row.get("question") or "").strip()
+        if not question:
+            continue
+        examples.append(
+            EvalExample(
+                question=question,
+                ground_truth=(row.get("ground_truth") or row.get("answer") or "").strip() or None,
+                metadata={k: v for k, v in row.items() if k not in {"question", "ground_truth", "answer"}},
+            )
+        )
+    return examples
+
+
 class EvalRunner:   # 封装基础评估流程
     def __init__(self, service: RagService) -> None:
         self.service = service  # 评估时需要重复调用 self.service.query(...) ，每条评估样本都走项目的正式问答链路
 
     def load_dataset(self, path: str | Path) -> list[EvalExample]:  # 读取评估数据集
-        dataset_path = Path(path).expanduser().resolve()
-        if not dataset_path.exists():
-            raise FileNotFoundError(f"Eval dataset does not exist: {dataset_path}")
-        with dataset_path.open("r", encoding="utf-8-sig", newline="") as fh:    # with ... as fh 是上下文管理器，文件读完后自动关闭
-            rows = list(csv.DictReader(fh))     # 把 CSV 每一行读成字典     list 再把迭代器一次性转成列表   rows 中包含多个待评估的问题，每一个问题（包括标注答案、tag等信息）组成一个 row
-        examples = []
-        for row in rows:
-            question = (row.get("question") or "").strip()
-            if not question:
-                continue
-            examples.append(
-                EvalExample(
-                    question=question,
-                    ground_truth=(row.get("ground_truth") or row.get("answer") or "").strip() or None,
-                    metadata={k: v for k, v in row.items() if k not in {"question", "ground_truth", "answer"}},
-                )
-            )
-        return examples
+        return load_eval_dataset(path)
 
     def default_output_path(self) -> Path:  # 默认结果路径
         timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")    # 产生类似 20260616-151230 的结果
@@ -61,6 +66,7 @@ class EvalRunner:   # 封装基础评估流程
         top_k: int | None = None,                       # 每次检索取多少条
         retrievers: list[str] | None = None,            # 要比较哪些检索器
         candidate_k: int | None = None,                 # 候选召回数量，给 hybrid/rerank 用
+        use_graph: bool = True,                         # 默认评估完整 LangGraph/RAG 链路；只检索请用 RetrievalEvalRunner
     ) -> list[EvalResult]:
         results: list[EvalResult] = []
         retriever_types = retrievers or self.service.settings.eval_retrievers
@@ -70,7 +76,7 @@ class EvalRunner:   # 封装基础评估流程
                 answer = self.service.query(            # 调用真实问答服务
                     example.question,
                     top_k=top_k,
-                    use_graph=retriever_type == "dense",
+                    use_graph=use_graph,
                     retriever_type=retriever_type,
                     candidate_k=candidate_k,
                 )
@@ -82,6 +88,12 @@ class EvalRunner:   # 封装基础评估流程
                         "top_k": top_k or self.service.settings.top_k,
                         "retriever_type": retriever_type,
                         "candidate_k": candidate_k if candidate_k is not None else self.service.settings.candidate_k,
+                        "use_graph": use_graph,
+                        "eval_layer": "rag",
+                        "category": example.metadata.get("category", ""),
+                        "answerable": example.metadata.get("answerable", ""),
+                        "expected_route": example.metadata.get("expected_route", ""),
+                        "expected_sources": _expected_sources(example.metadata),
                     }
                 )
                 results.append(
@@ -218,6 +230,164 @@ class EvalRunner:   # 封装基础评估流程
         return "\n".join(lines) # 把所有行用换行拼成一个 MD str
 
 
+class RetrievalEvalRunner:
+    """Evaluate retrieval quality without calling the LLM generation layer."""
+
+    def __init__(self, service: RagService) -> None:
+        self.service = service
+
+    def load_dataset(self, path: str | Path) -> list[EvalExample]:
+        return load_eval_dataset(path)
+
+    def default_output_path(self) -> Path:
+        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        return self.service.settings.resolved_project_root / "experiments" / "retrieval" / f"{timestamp}.csv"
+
+    def default_report_path(self, output_path: str | Path) -> Path:
+        path = Path(output_path).expanduser()
+        return path.with_suffix(".md")
+
+    def run(
+        self,
+        dataset_path: str | Path,
+        output_path: str | Path | None = None,
+        top_k: int | None = None,
+        retrievers: list[str] | None = None,
+        candidate_k: int | None = None,
+    ) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
+        retriever_types = retrievers or self.service.settings.eval_retrievers
+        effective_top_k = top_k or self.service.settings.top_k
+        effective_candidate_k = candidate_k if candidate_k is not None else self.service.settings.candidate_k
+        for example in self.load_dataset(dataset_path):
+            expected_sources = _expected_sources(example.metadata)
+            for retriever_type in retriever_types:
+                started = time.perf_counter()
+                retrieved = self.service.retrieve_only(
+                    question=example.question,
+                    top_k=effective_top_k,
+                    retriever_type=retriever_type,
+                    candidate_k=candidate_k,
+                )
+                elapsed = time.perf_counter() - started
+                retrieved_sources = [item.chunk.source_path for item in retrieved]
+                first_hit_rank = _first_expected_source_rank(retrieved_sources, expected_sources)
+                rows.append(
+                    {
+                        "question": example.question,
+                        "ground_truth": example.ground_truth or "",
+                        "category": example.metadata.get("category", ""),
+                        "answerable": example.metadata.get("answerable", ""),
+                        "expected_sources": expected_sources,
+                        "retriever_type": retriever_type,
+                        "top_k": effective_top_k,
+                        "candidate_k": effective_candidate_k,
+                        "context_count": len(retrieved),
+                        "retrieved_sources": retrieved_sources,
+                        "top_score": retrieved[0].score if retrieved else None,
+                        "hit": first_hit_rank is not None if expected_sources else None,
+                        "first_hit_rank": first_hit_rank,
+                        "reciprocal_rank": (1.0 / first_hit_rank) if first_hit_rank else None,
+                        "latency_seconds": round(elapsed, 4),
+                        "eval_layer": "retrieval",
+                    }
+                )
+        self.write_rows(rows, output_path or self.default_output_path())
+        return rows
+
+    def write_rows(self, rows: list[dict[str, Any]], output_path: str | Path) -> None:
+        path = Path(output_path).expanduser()
+        if path.suffix.lower() == ".jsonl":
+            dump_jsonl(path, rows)
+            return
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fieldnames = _retrieval_fieldnames(rows)
+        with path.open("w", encoding="utf-8", newline="") as fh:
+            writer = csv.DictWriter(fh, fieldnames=fieldnames)
+            writer.writeheader()
+            for row in rows:
+                writer.writerow({key: _csv_value(row.get(key)) for key in fieldnames})
+
+    def write_report(self, rows: list[dict[str, Any]], report_path: str | Path) -> None:
+        path = Path(report_path).expanduser()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(self.build_report(rows), encoding="utf-8")
+
+    def build_report(self, rows: list[dict[str, Any]]) -> str:
+        by_retriever: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        for row in rows:
+            by_retriever[str(row.get("retriever_type") or "unknown")].append(row)
+
+        lines = [
+            "# Retrieval Evaluation Report",
+            "",
+            "This report evaluates retrieval only. It does not call the LLM generation layer.",
+            "",
+            "## Summary",
+            "",
+            "| Retriever | Examples | With Expected Sources | Hit Rate | MRR | Avg Contexts | Avg Latency (s) |",
+            "| --- | ---: | ---: | ---: | ---: | ---: | ---: |",
+        ]
+        for retriever, items in sorted(by_retriever.items()):
+            expected_items = [item for item in items if item.get("expected_sources")]
+            hits = [item for item in expected_items if item.get("hit") is True]
+            hit_rate = len(hits) / len(expected_items) if expected_items else None
+            mrr = _average_row_value(expected_items, "reciprocal_rank")
+            avg_contexts = _average_row_value(items, "context_count")
+            avg_latency = _average_row_value(items, "latency_seconds")
+            lines.append(
+                f"| {retriever} | {len(items)} | {len(expected_items)} | {_format_ratio(hit_rate)} | "
+                f"{_format_ratio(mrr)} | {_format_ratio(avg_contexts)} | {_format_latency(avg_latency)} |"
+            )
+
+        lines.extend(
+            [
+                "",
+                "## Examples",
+                "",
+                "| Question | Retriever | Expected Sources | Hit | First Hit Rank | Retrieved Sources |",
+                "| --- | --- | --- | --- | ---: | --- |",
+            ]
+        )
+        for row in rows:
+            lines.append(
+                "| "
+                + " | ".join(
+                    [
+                        _escape_table_cell(str(row.get("question") or "")),
+                        _escape_table_cell(str(row.get("retriever_type") or "")),
+                        _escape_table_cell("; ".join(row.get("expected_sources") or [])),
+                        _escape_table_cell(_format_bool(row.get("hit"))),
+                        str(row.get("first_hit_rank") or ""),
+                        _escape_table_cell("; ".join(_short_source(source) for source in row.get("retrieved_sources") or [])),
+                    ]
+                )
+                + " |"
+            )
+
+        missed = [row for row in rows if row.get("expected_sources") and row.get("hit") is not True]
+        lines.extend(["", "## Potential Issues", ""])
+        if missed:
+            lines.extend(["| Question | Retriever | Expected Sources | Retrieved Sources |", "| --- | --- | --- | --- |"])
+            for row in missed:
+                lines.append(
+                    "| "
+                    + " | ".join(
+                        [
+                            _escape_table_cell(str(row.get("question") or "")),
+                            _escape_table_cell(str(row.get("retriever_type") or "")),
+                            _escape_table_cell("; ".join(row.get("expected_sources") or [])),
+                            _escape_table_cell("; ".join(_short_source(source) for source in row.get("retrieved_sources") or [])),
+                        ]
+                    )
+                    + " |"
+                )
+        else:
+            lines.append("No expected-source misses detected.")
+        lines.append("")
+        return "\n".join(lines)
+
+
 def _preview(text: str, limit: int = 120) -> str:   # 压缩答案预览
     compact = " ".join(text.split())
     if len(compact) <= limit:
@@ -281,3 +451,92 @@ def _format_ratio(value: Any) -> str:
     if isinstance(value, (int, float)):
         return f"{float(value):.2f}"
     return ""
+
+
+def _format_latency(value: Any) -> str:
+    if isinstance(value, (int, float)):
+        return f"{float(value):.4f}"
+    return ""
+
+
+def _format_bool(value: Any) -> str:
+    if value is True:
+        return "yes"
+    if value is False:
+        return "no"
+    return ""
+
+
+def _expected_sources(metadata: dict[str, Any]) -> list[str]:
+    raw = metadata.get("expected_sources") or metadata.get("expected_source") or ""
+    if isinstance(raw, list):
+        values = raw
+    else:
+        values = str(raw).replace("|", ";").split(";")
+    return [str(value).strip() for value in values if str(value).strip()]
+
+
+def _first_expected_source_rank(retrieved_sources: list[str], expected_sources: list[str]) -> int | None:
+    if not expected_sources:
+        return None
+    for rank, source in enumerate(retrieved_sources, start=1):
+        if any(_source_matches(source, expected) for expected in expected_sources):
+            return rank
+    return None
+
+
+def _source_matches(source_path: str, expected_source: str) -> bool:
+    source = source_path.replace("\\", "/")
+    expected = expected_source.replace("\\", "/").lstrip("./")
+    return source == expected or source.endswith(f"/{expected}") or source.endswith(expected)
+
+
+def _short_source(source_path: str) -> str:
+    source = source_path.replace("\\", "/")
+    markers = ("/docs/", "/data/", "/src/", "/tests/")
+    for marker in markers:
+        if marker in source:
+            return source[source.index(marker) + 1 :]
+    return Path(source).name
+
+
+def _retrieval_fieldnames(rows: list[dict[str, Any]]) -> list[str]:
+    preferred = [
+        "question",
+        "ground_truth",
+        "category",
+        "answerable",
+        "expected_sources",
+        "retriever_type",
+        "top_k",
+        "candidate_k",
+        "context_count",
+        "retrieved_sources",
+        "top_score",
+        "hit",
+        "first_hit_rank",
+        "reciprocal_rank",
+        "latency_seconds",
+        "eval_layer",
+    ]
+    fields = list(preferred)
+    for row in rows:
+        for key in row:
+            if key not in fields:
+                fields.append(key)
+    return fields
+
+
+def _average_row_value(rows: list[dict[str, Any]], key: str) -> float | None:
+    values = [float(row[key]) for row in rows if isinstance(row.get(key), (int, float))]
+    if not values:
+        return None
+    return sum(values) / len(values)
+
+
+def _csv_value(value: Any) -> Any:
+    if isinstance(value, (dict, list, tuple)):
+        return json.dumps(to_jsonable(value), ensure_ascii=False)
+    if value is None:
+        return ""
+    return value

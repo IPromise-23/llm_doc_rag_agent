@@ -10,7 +10,7 @@ cd /Users/ipromise/Desktop/llm_doc_rag_agent
 export PYTHONPATH=src
 ```
 
-如果要运行完整 `query/eval`，需要本地 `.env` 中配置 `DEEPSEEK_API_KEY`，并且 embedding 模型已可用。不要在演示材料、截图或输出里展示 `.env` 内容。
+如果要运行完整 `query/eval/ragas-eval`，需要本地 `.env` 中配置 `DEEPSEEK_API_KEY`，并且 embedding 模型已可用。不要在演示材料、截图或输出里展示 `.env` 内容。`eval-retrieval` 只做检索评估，不调用 LLM。
 
 ## 场景 1：索引本地文档
 
@@ -20,14 +20,24 @@ export PYTHONPATH=src
 
 ```bash
 python -m llm_doc_rag_agent.cli ingest \
+  --path README.md \
+  --collection project_eval \
+  --config configs/default.yaml
+
+python -m llm_doc_rag_agent.cli ingest \
+  --path docs \
+  --collection project_eval \
+  --config configs/default.yaml
+
+python -m llm_doc_rag_agent.cli ingest \
   --path data/raw \
-  --collection demo_docs \
+  --collection project_eval \
   --config configs/default.yaml
 ```
 
 可以讲：
 
-- `LocalDocumentLoader` 只读取显式传入的 `data/raw`。
+- `LocalDocumentLoader` 只读取显式传入的 `README.md`、`docs` 和 `data/raw`。
 - `.ragignore` 会跳过 `.env`、key、索引目录和实验输出。
 - 第二次 ingest 未变化文档会被跳过，避免重复 embedding。
 - Qdrant 使用本地 path 持久化，适合个人项目和本地知识库。
@@ -46,7 +56,7 @@ python -m llm_doc_rag_agent.cli ingest \
 ```bash
 python -m llm_doc_rag_agent.cli query \
   "What does the MVP expose?" \
-  --collection demo_docs \
+  --collection project_eval \
   --config configs/default.yaml \
   --top-k 3 \
   --retriever hybrid_rrf \
@@ -75,7 +85,7 @@ Source lookup 命令：
 ```bash
 python -m llm_doc_rag_agent.cli query \
   "请列出当前有哪些文档" \
-  --collection demo_docs \
+  --collection project_eval \
   --config configs/default.yaml
 ```
 
@@ -97,6 +107,67 @@ PYTHONPATH=src python -m pytest tests/test_agents.py -q
 - 也覆盖了超过 rewrite 预算后返回 insufficient context，而不是让 LLM 强答。
 - 这个设计用于控制幻觉风险，符合 RAG Agent 的基本工程边界。
 
+## 三层评估演示
+
+### 1. Retrieval-only eval
+
+目的：只评估检索命中，不调用 LLM，适合先确认 collection 和评估集是否对得上。
+
+```bash
+python -m llm_doc_rag_agent.cli eval-retrieval \
+  --dataset data/eval/questions.csv \
+  --collection project_eval \
+  --config configs/default.yaml \
+  --retriever dense \
+  --retriever bm25 \
+  --retriever hybrid_rrf \
+  --report experiments/reports/retrieval.md
+```
+
+可以讲：
+
+- 这一层使用 `expected_sources` 判断 source 是否进入 top-k。
+- 报告会给出 hit rate、MRR、平均上下文数和延迟。
+- 不会调用 LLM，因此适合在没有 API key 时先跑。
+
+### 2. Full RAG eval
+
+目的：评估完整问答链路，默认所有 retriever 都走同一条 LangGraph/RAG 边界。
+
+```bash
+python -m llm_doc_rag_agent.cli eval \
+  --dataset data/eval/questions.csv \
+  --collection project_eval \
+  --config configs/default.yaml \
+  --retriever dense \
+  --retriever hybrid_rrf \
+  --report experiments/reports/rag.md
+```
+
+可以讲：
+
+- 这一层会调用 `RagService.query()`，因此会触发 LLM 生成。
+- 报告包含答案预览、上下文数量、trace 和确定性质量诊断。
+- 如果只想绕过 LangGraph，可以显式加 `--no-graph`，但默认不绕过。
+
+### 3. RAGAS eval
+
+目的：离线 judge 评估 faithfulness、answer relevancy、context precision/recall。
+
+```bash
+python -m llm_doc_rag_agent.cli ragas-eval \
+  --dataset data/eval/questions.csv \
+  --collection project_eval \
+  --config configs/default.yaml \
+  --retriever dense \
+  --retriever hybrid_rrf
+```
+
+可以讲：
+
+- 这一层需要 judge LLM 和 `ground_truth`。
+- 它适合在 retrieval-only 和 full RAG eval 都能稳定跑通之后再用。
+
 ## 已验证的轻量命令
 
 以下命令不需要真实 LLM 调用，适合演示前做 sanity check：
@@ -104,14 +175,16 @@ PYTHONPATH=src python -m pytest tests/test_agents.py -q
 ```bash
 PYTHONPATH=src python -m pytest -q
 PYTHONPATH=src python -m llm_doc_rag_agent.cli query --help
+PYTHONPATH=src python -m llm_doc_rag_agent.cli eval-retrieval --help
 PYTHONPATH=src python -m llm_doc_rag_agent.cli eval --help
 ```
 
 最近一次验证结果：
 
 ```text
-27 passed
+34 passed
 query --help 正常渲染
+eval-retrieval --help 正常渲染
 eval --help 正常渲染
 ```
 
