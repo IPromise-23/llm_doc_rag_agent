@@ -2,6 +2,7 @@ from pathlib import Path
 
 from llm_doc_rag_agent.config import Settings
 from llm_doc_rag_agent.evaluation import EvalRunner, RagasEvalRunner, RetrievalEvalRunner
+from llm_doc_rag_agent.evaluation.ragas_runner import _with_openai_compatible_defaults
 from llm_doc_rag_agent.schemas import Answer, Chunk, RetrievedChunk
 
 
@@ -180,6 +181,61 @@ def test_eval_runner_writes_markdown_report(tmp_path: Path):
     assert "low_answer_ground_truth_coverage" in text
 
 
+def test_eval_report_treats_unanswerable_refusal_as_correct(tmp_path: Path):
+    report = tmp_path / "result.md"
+    service = FakeService(tmp_path)
+    runner = EvalRunner(service)
+    result = type(
+        "Result",
+        (),
+        {
+            "question": "What is the capital of France?",
+            "answer": "没有检索到足够相关的上下文，当前无法基于已索引文档可靠回答这个问题。",
+            "ground_truth": "The system should say there is insufficient context.",
+            "contexts": [],
+            "citations": [],
+            "trace": {
+                "retriever_type": "dense",
+                "answerable": "false",
+                "final_decision": "insufficient_context",
+            },
+        },
+    )()
+
+    runner.write_report([result], report)
+    text = report.read_text(encoding="utf-8")
+
+    assert "Correct Refusals" in text
+    assert "| dense | 0 |" in text
+    assert "No obvious deterministic quality issues detected." in text
+    assert "low_answer_ground_truth_coverage" not in text
+
+
+def test_eval_report_flags_unexpected_refusal_for_answerable_question(tmp_path: Path):
+    report = tmp_path / "result.md"
+    service = FakeService(tmp_path)
+    runner = EvalRunner(service)
+    result = type(
+        "Result",
+        (),
+        {
+            "question": "How does indexing work?",
+            "answer": "I cannot answer from the provided context.",
+            "ground_truth": "Indexing stores document chunks in Qdrant.",
+            "contexts": ["Indexing stores document chunks in Qdrant."],
+            "citations": [],
+            "trace": {"retriever_type": "dense", "answerable": "true"},
+        },
+    )()
+
+    runner.write_report([result], report)
+    text = report.read_text(encoding="utf-8")
+
+    assert "Unexpected Refusals" in text
+    assert "unexpected_refusal" in text
+    assert "low_answer_ground_truth_coverage" not in text
+
+
 def test_ragas_eval_runner_scores_existing_eval_results(tmp_path: Path, monkeypatch):
     class FakeEvaluationDataset:
         @classmethod
@@ -224,3 +280,14 @@ def test_ragas_eval_runner_scores_existing_eval_results(tmp_path: Path, monkeypa
     assert "faithfulness" in text
     assert "0.9" in text
     assert "# RAGAS Evaluation Report" in result.report_path.read_text(encoding="utf-8")
+
+
+def test_ragas_metric_defaults_force_single_generation():
+    class FakeMetric:
+        strictness = 3
+
+    metric = FakeMetric()
+    compatible = _with_openai_compatible_defaults(metric)
+
+    assert compatible.strictness == 1
+    assert metric.strictness == 3

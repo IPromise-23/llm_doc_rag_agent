@@ -5,6 +5,7 @@ RagasEvalRunner 负责把 EvalResult 转成 RAGAS 格式，调用 RAGAS + judge 
 from __future__ import annotations
 
 import csv                                                      # 写 CSV 评分
+import copy
 import importlib                                                # 动态导入 RAGAS metric
 import importlib.util                                           # 检查某个模块是否存在
 import json                                                     # 把 list / dict 写进 CSV 单元格时转成 JSON str
@@ -276,7 +277,14 @@ def _load_metric(name: str) -> Any:
         raise ValueError(f"Unsupported RAGAS metric '{name}'. Supported metrics: {choices}.")   # 如果不支持，报错，并给出支持的指标
     module_name, attr = _METRIC_IMPORTS[normalized] # python 的序列解包 执行后类似 module_name = "ragas.metrics._faithfulness"  attr = "faithfulness"
     module = importlib.import_module(module_name)   # 动态 import ，执行后 module 就是这个模块对象
-    return getattr(module, attr)    # getattr(obj,"name")   从对象上取出某个属性    最终返回的就是 RAGAS 的 metric 对象
+    return _with_openai_compatible_defaults(getattr(module, attr))    # getattr(obj,"name")   从对象上取出某个属性    最终返回的就是 RAGAS 的 metric 对象
+
+
+def _with_openai_compatible_defaults(metric: Any) -> Any:
+    metric = copy.deepcopy(metric)
+    if hasattr(metric, "strictness") and int(getattr(metric, "strictness") or 1) > 1:
+        setattr(metric, "strictness", 1)
+    return metric
 
 
 def _normalize_metrics(metrics: Sequence[str]) -> tuple[str, ...]:
