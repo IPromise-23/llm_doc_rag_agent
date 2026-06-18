@@ -44,6 +44,18 @@ def test_loader_uses_project_root_ragignore_for_nested_ingest(tmp_path: Path):
     assert docs[0].source_path.endswith("keep.md")
 
 
+def test_loader_reads_explicit_yaml_file(tmp_path: Path):
+    config = tmp_path / "default.yaml"
+    config.write_text("chunk_size: 900\nchunk_overlap: 120\n", encoding="utf-8")
+
+    docs = LocalDocumentLoader().load_path(config)
+
+    assert len(docs) == 1
+    assert docs[0].source_path.endswith("default.yaml")
+    assert "chunk_size: 900" in docs[0].text
+    assert docs[0].metadata["file_type"] == "yaml"
+
+
 def test_loader_reads_notebook_cells(tmp_path: Path):
     notebook = tmp_path / "demo.ipynb"
     notebook.write_text(

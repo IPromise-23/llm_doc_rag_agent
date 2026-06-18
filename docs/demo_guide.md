@@ -121,6 +121,8 @@ python -m llm_doc_rag_agent.cli eval-retrieval \
   --retriever dense \
   --retriever bm25 \
   --retriever hybrid_rrf \
+  --retriever hybrid_rerank \
+  --candidate-k 20 \
   --report experiments/reports/retrieval.md
 ```
 
@@ -129,6 +131,7 @@ python -m llm_doc_rag_agent.cli eval-retrieval \
 - 这一层使用 `expected_sources` 判断 source 是否进入 top-k。
 - 报告会给出 hit rate、MRR、平均上下文数和延迟。
 - 不会调用 LLM，因此适合在没有 API key 时先跑。
+- `hybrid_rerank` 只有在配置 `reranker_model` 后才会加载真实 CrossEncoder；未配置时是 NoOp reranker，只能验证 rerank 分支和候选集路径。
 
 ### 2. Full RAG eval
 
@@ -140,7 +143,10 @@ python -m llm_doc_rag_agent.cli eval \
   --collection project_eval \
   --config configs/default.yaml \
   --retriever dense \
+  --retriever bm25 \
   --retriever hybrid_rrf \
+  --retriever hybrid_rerank \
+  --candidate-k 20 \
   --report experiments/reports/rag.md
 ```
 
@@ -160,13 +166,17 @@ python -m llm_doc_rag_agent.cli ragas-eval \
   --collection project_eval \
   --config configs/default.yaml \
   --retriever dense \
-  --retriever hybrid_rrf
+  --retriever bm25 \
+  --retriever hybrid_rrf \
+  --retriever hybrid_rerank \
+  --candidate-k 20
 ```
 
 可以讲：
 
 - 这一层需要 judge LLM 和 `ground_truth`。
 - 它适合在 retrieval-only 和 full RAG eval 都能稳定跑通之后再用。
+- 如果 RAGAS 报告里没有 `bm25`、`hybrid_rrf` 或 `hybrid_rerank`，通常是命令没有重复传 `--retriever`；如果有 `hybrid_rerank` 但没有真实 rerank 收益，要检查 `reranker_model` / `RERANKER_MODEL` 是否配置。
 
 ## 已验证的轻量命令
 

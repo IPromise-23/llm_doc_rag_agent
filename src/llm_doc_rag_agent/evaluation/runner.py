@@ -88,6 +88,7 @@ class EvalRunner:   # 封装基础评估流程
                         "top_k": top_k or self.service.settings.top_k,
                         "retriever_type": retriever_type,
                         "candidate_k": candidate_k if candidate_k is not None else self.service.settings.candidate_k,
+                        "reranker_model": self.service.settings.reranker_model or "",
                         "use_graph": use_graph,
                         "eval_layer": "rag",
                         "category": example.metadata.get("category", ""),
@@ -165,6 +166,9 @@ class EvalRunner:   # 封装基础评估流程
             avg_latency = sum(float(item.trace.get("latency_seconds", 0.0)) for item in items) / max(len(items), 1) # 计算平均耗时
             lines.append(f"| {retriever} | {len(items)} | {avg_contexts:.2f} | {avg_latency:.4f} |")    # 把统计结果追加为 MD 表格行
 
+        lines.extend(["", "## Data Analysis", ""])
+        lines.extend(_rag_analysis_notes(results))
+
         lines.extend(   # 这些指标是确定性词项诊断
             [
                 "",
@@ -190,6 +194,59 @@ class EvalRunner:   # 封装基础评估流程
                 f"{_format_ratio(answer_ground_truth)} | {_format_ratio(context_ground_truth)} | "
                 f"{correct_refusals} | {unexpected_refusals} | {missed_refusals} |"
             )
+
+        lines.extend(
+            [
+                "",
+                "## Category Diagnostics",
+                "",
+                "| Category | Retriever | Examples | Avg Answer/Ground Truth | Avg Context/Ground Truth | Correct Refusals | Unexpected Refusals | Missed Refusals | Trace Risks |",
+                "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+            ]
+        )
+        for category, retriever, items in _group_results_by_category_and_retriever(results):
+            metrics = [_quality_metrics(item) for item in items]
+            risk_count = sum(1 for item in items if _trace_risk_signals(item))
+            lines.append(
+                f"| {_escape_table_cell(category)} | {_escape_table_cell(retriever)} | {len(items)} | "
+                f"{_format_ratio(_average_metric(metrics, 'answer_ground_truth_coverage'))} | "
+                f"{_format_ratio(_average_metric(metrics, 'context_ground_truth_coverage'))} | "
+                f"{sum(1 for metric in metrics if metric['correct_refusal'])} | "
+                f"{sum(1 for metric in metrics if metric['unexpected_refusal'])} | "
+                f"{sum(1 for metric in metrics if metric['missed_refusal'])} | "
+                f"{risk_count} |"
+            )
+
+        decision_rows = _decision_signal_rows(results)
+        lines.extend(["", "## Decision Signals", ""])
+        if decision_rows:
+            lines.extend(
+                [
+                    "| Question | Category | Retriever | Final | Document Grade | Grounded | Relevant | Signals | Graph Path |",
+                    "| --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+                ]
+            )
+            for result, signals in decision_rows:
+                trace = result.trace
+                lines.append(
+                    "| "
+                    + " | ".join(
+                        [
+                            _escape_table_cell(result.question),
+                            _escape_table_cell(_category(result)),
+                            _escape_table_cell(str(trace.get("retriever_type") or "unknown")),
+                            _escape_table_cell(str(trace.get("final_decision") or "")),
+                            _escape_table_cell(str(trace.get("document_grade_decision") or "")),
+                            _escape_table_cell(_format_bool(trace.get("answer_grounded"))),
+                            _escape_table_cell(_format_bool(trace.get("answer_relevant"))),
+                            _escape_table_cell(", ".join(signals)),
+                            _escape_table_cell(_graph_path(trace)),
+                        ]
+                    )
+                    + " |"
+                )
+        else:
+            lines.append("No trace-level decision risks detected.")
 
         lines.extend(   # 添加 examples 表格
             [
@@ -292,6 +349,7 @@ class RetrievalEvalRunner:
                         "first_hit_rank": first_hit_rank,
                         "reciprocal_rank": (1.0 / first_hit_rank) if first_hit_rank else None,
                         "latency_seconds": round(elapsed, 4),
+                        "reranker_model": self.service.settings.reranker_model or "",
                         "eval_layer": "retrieval",
                     }
                 )
@@ -335,13 +393,54 @@ class RetrievalEvalRunner:
             expected_items = [item for item in items if item.get("expected_sources")]
             hits = [item for item in expected_items if item.get("hit") is True]
             hit_rate = len(hits) / len(expected_items) if expected_items else None
-            mrr = _average_row_value(expected_items, "reciprocal_rank")
+            mrr = _mean_reciprocal_rank(expected_items)
             avg_contexts = _average_row_value(items, "context_count")
             avg_latency = _average_row_value(items, "latency_seconds")
             lines.append(
                 f"| {retriever} | {len(items)} | {len(expected_items)} | {_format_ratio(hit_rate)} | "
                 f"{_format_ratio(mrr)} | {_format_ratio(avg_contexts)} | {_format_latency(avg_latency)} |"
             )
+
+        lines.extend(["", "## Data Analysis", ""])
+        lines.extend(_retrieval_analysis_notes(rows))
+
+        lines.extend(
+            [
+                "",
+                "## Category Summary",
+                "",
+                "| Category | Retriever | With Expected Sources | Hit Rate | MRR | Rank@1 | Avg First Hit Rank |",
+                "| --- | --- | ---: | ---: | ---: | ---: | ---: |",
+            ]
+        )
+        for category, retriever, items in _group_rows_by_category_and_retriever(rows):
+            expected_items = [item for item in items if item.get("expected_sources")]
+            hits = [item for item in expected_items if item.get("hit") is True]
+            hit_rate = len(hits) / len(expected_items) if expected_items else None
+            ranks = [
+                int(item["first_hit_rank"])
+                for item in expected_items
+                if isinstance(item.get("first_hit_rank"), int)
+            ]
+            rank_at_1 = sum(1 for rank in ranks if rank == 1) / len(expected_items) if expected_items else None
+            avg_rank = sum(ranks) / len(ranks) if ranks else None
+            lines.append(
+                f"| {_escape_table_cell(category)} | {_escape_table_cell(retriever)} | {len(expected_items)} | "
+                f"{_format_ratio(hit_rate)} | {_format_ratio(_mean_reciprocal_rank(expected_items))} | "
+                f"{_format_ratio(rank_at_1)} | {_format_ratio(avg_rank)} |"
+            )
+
+        lines.extend(
+            [
+                "",
+                "## Retriever Guidance",
+                "",
+                "| Retriever | Guidance Signal |",
+                "| --- | --- |",
+            ]
+        )
+        for retriever, items in sorted(by_retriever.items()):
+            lines.append(f"| {_escape_table_cell(retriever)} | {_escape_table_cell(_retriever_guidance(items))} |")
 
         lines.extend(
             [
@@ -447,9 +546,203 @@ def _quality_issue_rows(results: list[EvalResult]) -> list[tuple[EvalResult, lis
             signals.append("low_answer_ground_truth_coverage")
         if metrics["context_ground_truth_coverage"] is not None and metrics["context_ground_truth_coverage"] < 0.2:
             signals.append("low_context_ground_truth_coverage")
+        signals.extend(_trace_risk_signals(result))
         if signals:
             rows.append((result, signals))
     return rows
+
+
+def _group_results_by_category_and_retriever(results: list[EvalResult]) -> list[tuple[str, str, list[EvalResult]]]:
+    grouped: dict[tuple[str, str], list[EvalResult]] = defaultdict(list)
+    for result in results:
+        grouped[(_category(result), str(result.trace.get("retriever_type") or "unknown"))].append(result)
+    return [(category, retriever, items) for (category, retriever), items in sorted(grouped.items())]
+
+
+def _group_rows_by_category_and_retriever(rows: list[dict[str, Any]]) -> list[tuple[str, str, list[dict[str, Any]]]]:
+    grouped: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        category = str(row.get("category") or "uncategorized")
+        retriever = str(row.get("retriever_type") or "unknown")
+        grouped[(category, retriever)].append(row)
+    return [(category, retriever, items) for (category, retriever), items in sorted(grouped.items())]
+
+
+def _retrieval_analysis_notes(rows: list[dict[str, Any]]) -> list[str]:
+    if not rows:
+        return ["No retrieval rows were produced."]
+    expected_rows = [row for row in rows if row.get("expected_sources")]
+    misses = [row for row in expected_rows if row.get("hit") is not True]
+    notes = [
+        f"- Evaluated {len(rows)} retrieval rows; {len(expected_rows)} rows had `expected_sources` labels.",
+    ]
+    if expected_rows:
+        notes.append(
+            f"- Expected-source hit rate is {_format_ratio((len(expected_rows) - len(misses)) / len(expected_rows))}; "
+            f"{len(misses)} expected-source miss(es) were detected."
+        )
+    best_mrr = _best_retriever_by_mrr(rows)
+    if best_mrr:
+        notes.append(
+            f"- Best MRR in this run: `{best_mrr[0]}` at {_format_ratio(best_mrr[1])}. "
+            "Use retrieval MRR before changing prompts, because this layer never calls the LLM."
+        )
+    best_rank1 = _best_rank_at_1(rows)
+    if best_rank1:
+        notes.append(f"- Best Rank@1 share: `{best_rank1[0]}` at {_format_ratio(best_rank1[1])}.")
+    notes.append(f"- {_rerank_analysis_note_from_rows(rows)}")
+    if misses:
+        notes.append("- Next action: inspect `expected_sources` first, then compare retriever settings or `candidate_k`.")
+    else:
+        notes.append("- Next action: retrieval recall is acceptable; inspect full RAG answer quality and RAGAS judge scores next.")
+    return notes
+
+
+def _rag_analysis_notes(results: list[EvalResult]) -> list[str]:
+    if not results:
+        return ["No RAG rows were produced."]
+    metrics = [_quality_metrics(result) for result in results]
+    correct_refusals = sum(1 for metric in metrics if metric["correct_refusal"])
+    unexpected_refusals = sum(1 for metric in metrics if metric["unexpected_refusal"])
+    missed_refusals = sum(1 for metric in metrics if metric["missed_refusal"])
+    risks = _decision_signal_rows(results)
+    retriever_count = len({str(result.trace.get("retriever_type") or "unknown") for result in results})
+    notes = [
+        f"- Evaluated {len(results)} full RAG rows across {retriever_count} retriever setting(s).",
+        f"- Refusal diagnostics: {correct_refusals} correct refusal(s), {unexpected_refusals} unexpected refusal(s), {missed_refusals} missed refusal(s).",
+    ]
+    lowest_category = _lowest_category_metric(results, "answer_ground_truth_coverage")
+    if lowest_category:
+        category, retriever, value = lowest_category
+        notes.append(
+            f"- Lowest category answer/ground-truth coverage: `{category}` with `{retriever}` at {_format_ratio(value)}. "
+            "Inspect those rows before tuning prompts globally."
+        )
+    if risks:
+        notes.append(f"- Trace-level risks detected in {len(risks)} row(s); inspect the Decision Signals table before changing retrieval.")
+    else:
+        notes.append("- No trace-level groundedness/relevance risks were detected by the runtime quality gate.")
+    notes.append(f"- {_rerank_analysis_note_from_results(results)}")
+    notes.append("- Next action: if retrieval is already healthy, compare answer quality and RAGAS low-score rows by retriever.")
+    return notes
+
+
+def _best_retriever_by_average(rows: list[dict[str, Any]], key: str) -> tuple[str, float] | None:
+    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        grouped[str(row.get("retriever_type") or "unknown")].append(row)
+    best: tuple[str, float] | None = None
+    for retriever, items in grouped.items():
+        value = _average_row_value(items, key)
+        if value is None:
+            continue
+        if best is None or value > best[1]:
+            best = (retriever, value)
+    return best
+
+
+def _best_retriever_by_mrr(rows: list[dict[str, Any]]) -> tuple[str, float] | None:
+    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        grouped[str(row.get("retriever_type") or "unknown")].append(row)
+    best: tuple[str, float] | None = None
+    for retriever, items in grouped.items():
+        expected_items = [item for item in items if item.get("expected_sources")]
+        value = _mean_reciprocal_rank(expected_items)
+        if value is None:
+            continue
+        if best is None or value > best[1]:
+            best = (retriever, value)
+    return best
+
+
+def _best_rank_at_1(rows: list[dict[str, Any]]) -> tuple[str, float] | None:
+    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        grouped[str(row.get("retriever_type") or "unknown")].append(row)
+    best: tuple[str, float] | None = None
+    for retriever, items in grouped.items():
+        expected_items = [item for item in items if item.get("expected_sources")]
+        if not expected_items:
+            continue
+        value = sum(1 for item in expected_items if item.get("first_hit_rank") == 1) / len(expected_items)
+        if best is None or value > best[1]:
+            best = (retriever, value)
+    return best
+
+
+def _lowest_category_metric(results: list[EvalResult], key: str) -> tuple[str, str, float] | None:
+    lowest: tuple[str, str, float] | None = None
+    for category, retriever, items in _group_results_by_category_and_retriever(results):
+        value = _average_metric([_quality_metrics(item) for item in items], key)
+        if value is None:
+            continue
+        if lowest is None or value < lowest[2]:
+            lowest = (category, retriever, value)
+    return lowest
+
+
+def _rerank_analysis_note_from_rows(rows: list[dict[str, Any]]) -> str:
+    rerank_rows = [row for row in rows if "rerank" in str(row.get("retriever_type") or "")]
+    if not rerank_rows:
+        return "No rerank retriever was included in this run."
+    configured = sorted({str(row.get("reranker_model") or "") for row in rerank_rows if row.get("reranker_model")})
+    if configured:
+        return f"Rerank retriever was included with reranker model(s): {', '.join(configured)}."
+    return "Rerank retriever was included, but no `reranker_model` was configured; results use the NoOp reranker path."
+
+
+def _rerank_analysis_note_from_results(results: list[EvalResult]) -> str:
+    return _rerank_analysis_note_from_rows([result.trace for result in results])
+
+
+def _retriever_guidance(rows: list[dict[str, Any]]) -> str:
+    expected_rows = [row for row in rows if row.get("expected_sources")]
+    if not expected_rows:
+        return "No expected_sources labels; use this row only for exploratory inspection."
+    misses = [row for row in expected_rows if row.get("hit") is not True]
+    if misses:
+        return "Fix expected_sources labels or retrieval strategy before tuning generation."
+    rank_one = sum(1 for row in expected_rows if row.get("first_hit_rank") == 1)
+    if rank_one < len(expected_rows):
+        return "Recall is acceptable; compare rank/MRR before changing prompts or top_k."
+    return "Expected sources are consistently ranked first; inspect generation or judge scores next."
+
+
+def _decision_signal_rows(results: list[EvalResult]) -> list[tuple[EvalResult, list[str]]]:
+    rows: list[tuple[EvalResult, list[str]]] = []
+    for result in results:
+        signals = _trace_risk_signals(result)
+        if signals:
+            rows.append((result, signals))
+    return rows
+
+
+def _trace_risk_signals(result: EvalResult) -> list[str]:
+    if _quality_metrics(result)["correct_refusal"]:
+        return []
+    trace = result.trace
+    signals: list[str] = []
+    if trace.get("answer_grounded") is False:
+        signals.append("answer_not_grounded")
+    if trace.get("answer_relevant") is False:
+        signals.append("answer_not_relevant")
+    expected_route = str(trace.get("expected_route") or "").strip()
+    actual_route = str(trace.get("route") or "").strip()
+    if expected_route and actual_route and expected_route != actual_route:
+        signals.append("route_mismatch")
+    return signals
+
+
+def _category(result: EvalResult) -> str:
+    return str(result.trace.get("category") or "uncategorized")
+
+
+def _graph_path(trace: dict[str, Any]) -> str:
+    path = trace.get("graph_path") or []
+    if isinstance(path, list):
+        return " -> ".join(str(item) for item in path)
+    return str(path)
 
 
 def _overlap_ratio(source_terms: set[str], target_terms: set[str]) -> float:
@@ -585,6 +878,12 @@ def _average_row_value(rows: list[dict[str, Any]], key: str) -> float | None:
     if not values:
         return None
     return sum(values) / len(values)
+
+
+def _mean_reciprocal_rank(rows: list[dict[str, Any]]) -> float | None:
+    if not rows:
+        return None
+    return sum(float(row.get("reciprocal_rank") or 0.0) for row in rows) / len(rows)
 
 
 def _csv_value(value: Any) -> Any:

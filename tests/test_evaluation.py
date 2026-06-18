@@ -2,6 +2,7 @@ from pathlib import Path
 
 from llm_doc_rag_agent.config import Settings
 from llm_doc_rag_agent.evaluation import EvalRunner, RagasEvalRunner, RetrievalEvalRunner
+from llm_doc_rag_agent.evaluation.runner import load_eval_dataset
 from llm_doc_rag_agent.evaluation.ragas_runner import _with_openai_compatible_defaults
 from llm_doc_rag_agent.schemas import Answer, Chunk, RetrievedChunk
 
@@ -62,6 +63,15 @@ class FakeService:
             content_hash="hash",
         )
         return [RetrievedChunk(chunk=chunk, score=0.9, retriever_type=active_retriever)]
+
+
+def test_extended_project_eval_dataset_loads():
+    examples = load_eval_dataset("data/eval/questions_project_extended.csv")
+
+    assert len(examples) >= 20
+    assert any(example.metadata.get("category") == "retrieval" for example in examples)
+    assert any("hybrid_rerank" in example.question for example in examples)
+    assert any(example.metadata.get("answerable") == "false" for example in examples)
 
 
 def test_eval_runner_compares_multiple_retrievers(tmp_path: Path):
@@ -126,6 +136,43 @@ def test_retrieval_eval_runner_does_not_call_generation(tmp_path: Path):
     text = report.read_text(encoding="utf-8")
     assert "# Retrieval Evaluation Report" in text
     assert "does not call the LLM generation layer" in text
+    assert "## Data Analysis" in text
+    assert "## Category Summary" in text
+    assert "## Retriever Guidance" in text
+    assert "Expected sources are consistently ranked first" in text
+
+
+def test_retrieval_report_mrr_counts_misses_as_zero(tmp_path: Path):
+    service = FakeService(tmp_path)
+    runner = RetrievalEvalRunner(service)
+    rows = [
+        {
+            "question": "Hit?",
+            "category": "retrieval",
+            "expected_sources": ["docs/hit.md"],
+            "retriever_type": "dense",
+            "context_count": 1,
+            "hit": True,
+            "first_hit_rank": 1,
+            "reciprocal_rank": 1.0,
+            "latency_seconds": 0.01,
+        },
+        {
+            "question": "Miss?",
+            "category": "retrieval",
+            "expected_sources": ["docs/miss.md"],
+            "retriever_type": "dense",
+            "context_count": 1,
+            "hit": False,
+            "first_hit_rank": None,
+            "reciprocal_rank": None,
+            "latency_seconds": 0.01,
+        },
+    ]
+
+    text = runner.build_report(rows)
+
+    assert "| dense | 2 | 2 | 0.50 | 0.50 |" in text
 
 
 def test_eval_runner_writes_retriever_type_to_csv(tmp_path: Path):
@@ -175,10 +222,50 @@ def test_eval_runner_writes_markdown_report(tmp_path: Path):
     assert "| bm25 | 1 |" in text
     assert "dense answer" in text
     assert "bm25 answer" in text
+    assert "## Data Analysis" in text
     assert "## Quality Diagnostics" in text
     assert "These are deterministic lexical diagnostics" in text
     assert "Truth" in text
     assert "low_answer_ground_truth_coverage" in text
+    assert "## Category Diagnostics" in text
+    assert "## Decision Signals" in text
+
+
+def test_eval_report_surfaces_trace_decision_risks(tmp_path: Path):
+    report = tmp_path / "result.md"
+    service = FakeService(tmp_path)
+    runner = EvalRunner(service)
+    result = type(
+        "Result",
+        (),
+        {
+            "question": "What API work is planned?",
+            "answer": "The API work is unclear.",
+            "ground_truth": "Planned API work includes request id and streaming query.",
+            "contexts": ["Planned API work includes request id and streaming query."],
+            "citations": [],
+            "trace": {
+                "retriever_type": "hybrid_rrf",
+                "category": "roadmap",
+                "route": "retrieve_rag",
+                "expected_route": "retrieve_rag",
+                "document_grade_decision": "accept",
+                "final_decision": "generated",
+                "answer_grounded": False,
+                "answer_relevant": False,
+                "graph_path": ["route_question", "retrieve", "grade_documents", "generate", "grade_generation"],
+            },
+        },
+    )()
+
+    runner.write_report([result], report)
+    text = report.read_text(encoding="utf-8")
+
+    assert "## Category Diagnostics" in text
+    assert "| roadmap | hybrid_rrf | 1 |" in text
+    assert "## Decision Signals" in text
+    assert "answer_not_grounded, answer_not_relevant" in text
+    assert "route_question -> retrieve -> grade_documents -> generate -> grade_generation" in text
 
 
 def test_eval_report_treats_unanswerable_refusal_as_correct(tmp_path: Path):
@@ -279,7 +366,64 @@ def test_ragas_eval_runner_scores_existing_eval_results(tmp_path: Path, monkeypa
     text = output.read_text(encoding="utf-8")
     assert "faithfulness" in text
     assert "0.9" in text
-    assert "# RAGAS Evaluation Report" in result.report_path.read_text(encoding="utf-8")
+    report_text = result.report_path.read_text(encoding="utf-8")
+    assert "# RAGAS Evaluation Report" in report_text
+    assert "## Data Analysis" in report_text
+    assert "## Low Score Diagnostics" in report_text
+
+
+def test_ragas_report_surfaces_low_score_diagnostics(tmp_path: Path):
+    report = tmp_path / "ragas.md"
+    service = FakeService(tmp_path)
+    runner = RagasEvalRunner(service)
+    rows = [
+        {
+            "question": "What is planned for API?",
+            "answer": "The API plan is unclear.",
+            "ground_truth": "Planned API work includes request id and streaming query.",
+            "retriever_type": "dense",
+            "context_count": 2,
+            "trace": {
+                "answer_grounded": False,
+                "answer_relevant": False,
+                "document_grade_decision": "accept",
+            },
+            "faithfulness": 0.6,
+            "answer_relevancy": 0.9,
+        }
+    ]
+
+    runner.write_report(rows, report, ["faithfulness", "answer_relevancy"])
+    text = report.read_text(encoding="utf-8")
+
+    assert "## Low Score Diagnostics" in text
+    assert "## Data Analysis" in text
+    assert "faithfulness" in text
+    assert "0.6000" in text
+    assert "answer_not_grounded, answer_not_relevant" in text
+
+
+def test_ragas_report_mentions_rerank_when_present(tmp_path: Path):
+    report = tmp_path / "ragas.md"
+    service = FakeService(tmp_path)
+    runner = RagasEvalRunner(service)
+    rows = [
+        {
+            "question": "Which retriever is reranked?",
+            "answer": "hybrid_rerank reranks hybrid candidates.",
+            "ground_truth": "hybrid_rerank reranks hybrid RRF candidates.",
+            "retriever_type": "hybrid_rerank",
+            "context_count": 2,
+            "trace": {"reranker_model": "cross-encoder/test"},
+            "faithfulness": 0.9,
+            "answer_relevancy": 0.8,
+        }
+    ]
+
+    runner.write_report(rows, report, ["faithfulness", "answer_relevancy"])
+    text = report.read_text(encoding="utf-8")
+
+    assert "Rerank retriever was included with reranker model(s): cross-encoder/test." in text
 
 
 def test_ragas_metric_defaults_force_single_generation():

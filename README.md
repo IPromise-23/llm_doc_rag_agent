@@ -106,9 +106,9 @@ llm-doc-rag retrieve "混合检索问题" --collection my_docs --retriever hybri
 llm-doc-rag retrieve "需要精排的问题" --collection my_docs --retriever hybrid_rerank --candidate-k 20
 llm-doc-rag query "请列出当前有哪些文档" --collection my_docs
 llm-doc-rag query "查看 source=path/to/file.md 的 chunks" --collection my_docs
-llm-doc-rag eval-retrieval --dataset data/eval/questions.csv --collection project_eval --retriever dense --retriever bm25 --retriever hybrid_rrf --report experiments/reports/retrieval.md
-llm-doc-rag eval --dataset data/eval/questions.csv --collection project_eval --retriever dense --retriever bm25 --retriever hybrid_rrf --report experiments/reports/rag.md
-llm-doc-rag ragas-eval --dataset data/eval/questions.csv --collection my_docs --retriever dense --retriever hybrid_rrf --metric faithfulness --metric answer_relevancy
+llm-doc-rag eval-retrieval --dataset data/eval/questions.csv --collection project_eval --retriever dense --retriever bm25 --retriever hybrid_rrf --retriever hybrid_rerank --candidate-k 20 --report experiments/reports/retrieval.md
+llm-doc-rag eval --dataset data/eval/questions.csv --collection project_eval --retriever dense --retriever bm25 --retriever hybrid_rrf --retriever hybrid_rerank --candidate-k 20 --report experiments/reports/rag.md
+llm-doc-rag ragas-eval --dataset data/eval/questions.csv --collection my_docs --retriever dense --retriever bm25 --retriever hybrid_rrf --retriever hybrid_rerank --candidate-k 20 --metric faithfulness --metric answer_relevancy
 llm-doc-rag sources --collection my_docs
 llm-doc-rag chunks --source path/to/file.md --collection my_docs
 llm-doc-rag inspect-collection --collection my_docs
@@ -157,6 +157,8 @@ python -m llm_doc_rag_agent.cli eval-retrieval \
   --retriever dense \
   --retriever bm25 \
   --retriever hybrid_rrf \
+  --retriever hybrid_rerank \
+  --candidate-k 20 \
   --report experiments/reports/retrieval.md
 
 python -m llm_doc_rag_agent.cli eval \
@@ -164,18 +166,22 @@ python -m llm_doc_rag_agent.cli eval \
   --collection project_eval \
   --config configs/default.yaml \
   --retriever dense \
+  --retriever bm25 \
   --retriever hybrid_rrf \
+  --retriever hybrid_rerank \
+  --candidate-k 20 \
   --report experiments/reports/rag.md
 ```
 
 `data/eval/questions.csv` 当前以项目自带文档为目标语料，字段包括 `question`、`ground_truth`、`expected_sources`、`expected_route`、`answerable`、`category` 和 `notes`。如果后续换成真实业务文档，先把目标文档入库，再按同样字段补充评估问题。
+`data/eval/questions_project_extended.csv` 是更大的项目自检集，用于比较 dense、BM25、hybrid RRF 和 hybrid rerank 在 CLI、配置项、Agent 路由、评估链路和负例问题上的表现。这个扩展集包含 `configs/default.yaml` 的配置题；跑它之前需要把 `configs/default.yaml` 也 ingest 到目标 collection，否则 config 类问题会变成“评估标签指向未入库文档”的漏召回。`configs/default.yaml` 里的 `eval_retrievers` 也已经扩成这四种，方便直接做回归。
 
 ## 当前边界
 
 这些能力目前还没有完全工程化，后续版本会优先补齐：
 
 - 当前 BM25/hybrid 基于已有 chunk payload 临时计算，还没有 Qdrant named sparse vectors 和持久化 sparse 索引。
-- Reranker 已有可插拔策略入口；默认未配置 `reranker_model` 时不会加载 CrossEncoder，只做候选截断。
+- Reranker 已有可插拔策略入口；默认未配置 `reranker_model` 时不会加载 CrossEncoder，`dense_rerank` / `hybrid_rerank` 会走 NoOp reranker，因此只能验证候选集路径，不能代表真实 rerank 收益。
 - CRAG/Self-RAG 运行时 gate 默认仍是规则型轻量实现；离线评估已提供 `ragas-eval`，会复用 DeepSeek/OpenAI-compatible judge，并默认关闭 DeepSeek thinking。
 - Eval 已拆成三层：`eval-retrieval` 负责不调用 LLM 的检索命中评估，`eval` 负责完整 RAG/Graph 答案评估，`ragas-eval` 负责离线自动质量指标。RAGAS 运行前需要 dataset 提供 `ground_truth`。
 - API 已有项目根目录路径限制和统一错误响应雏形，但 request id、streaming 和 collection 管理还未补齐。

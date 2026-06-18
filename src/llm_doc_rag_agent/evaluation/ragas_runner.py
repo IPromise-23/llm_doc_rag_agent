@@ -203,6 +203,39 @@ class RagasEvalRunner:  # 对已有 serivce 生成的答案作离线评估
             values.extend(_format_average(items, metric) for metric in metrics)
             lines.append("| " + " | ".join(values) + " |")
 
+        lines.extend(["", "## Data Analysis", ""])
+        lines.extend(_ragas_analysis_notes(rows, metrics))
+
+        lines.extend(
+            [
+                "",
+                "## Low Score Diagnostics",
+                "",
+                "| Question | Retriever | Metric | Score | Contexts | Trace Signals | Answer Preview |",
+                "| --- | --- | --- | ---: | ---: | --- | --- |",
+            ]
+        )
+        low_score_rows = _low_score_rows(rows, metrics)
+        if low_score_rows:
+            for row, metric, score in low_score_rows:
+                lines.append(
+                    "| "
+                    + " | ".join(
+                        [
+                            _escape_table_cell(str(row.get("question") or "")),
+                            _escape_table_cell(str(row.get("retriever_type") or "unknown")),
+                            _escape_table_cell(metric),
+                            _format_number(score),
+                            str(row.get("context_count") or 0),
+                            _escape_table_cell(", ".join(_trace_signals(row)) or "judge_or_answer_style"),
+                            _escape_table_cell(_preview(str(row.get("answer") or ""))),
+                        ]
+                    )
+                    + " |"
+                )
+        else:
+            lines.append("|  |  |  |  |  | No scores below 0.80. |  |")
+
         lines.extend(
             [
                 "",
@@ -357,6 +390,88 @@ def _format_average(rows: list[dict[str, Any]], metric: str) -> str:
     if not values:
         return ""
     return f"{sum(values) / len(values):.4f}"
+
+
+def _low_score_rows(
+    rows: list[dict[str, Any]],
+    metrics: Sequence[str],
+    threshold: float = 0.80,
+) -> list[tuple[dict[str, Any], str, float]]:
+    low_rows: list[tuple[dict[str, Any], str, float]] = []
+    for row in rows:
+        for metric in metrics:
+            value = row.get(metric)
+            if isinstance(value, (int, float)) and float(value) < threshold:
+                low_rows.append((row, metric, float(value)))
+    return sorted(low_rows, key=lambda item: (item[1], item[2], str(item[0].get("question") or "")))
+
+
+def _ragas_analysis_notes(rows: list[dict[str, Any]], metrics: Sequence[str]) -> list[str]:
+    if not rows:
+        return ["No RAGAS rows were produced."]
+    retrievers = sorted({str(row.get("retriever_type") or "unknown") for row in rows})
+    notes = [
+        f"- Evaluated {len(rows)} RAGAS row(s) across {len(retrievers)} retriever setting(s): {', '.join(retrievers)}.",
+    ]
+    for metric in metrics:
+        best = _best_metric_by_retriever(rows, metric)
+        if best:
+            notes.append(f"- Best average `{metric}`: `{best[0]}` at {_format_number(best[1])}.")
+    low_rows = _low_score_rows(rows, metrics)
+    if low_rows:
+        notes.append(
+            f"- {len(low_rows)} metric value(s) were below 0.80; inspect the Low Score Diagnostics table before changing prompts or retrievers."
+        )
+    else:
+        notes.append("- No RAGAS metric values below 0.80 were detected.")
+    notes.append(f"- {_rerank_analysis_note(rows)}")
+    notes.append("- Next action: compare this report with retrieval MRR/Rank@1; low RAGAS with healthy retrieval usually points to answer style, context packaging, or judge/reference mismatch.")
+    return notes
+
+
+def _best_metric_by_retriever(rows: list[dict[str, Any]], metric: str) -> tuple[str, float] | None:
+    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        grouped[str(row.get("retriever_type") or "unknown")].append(row)
+    best: tuple[str, float] | None = None
+    for retriever, items in grouped.items():
+        values = [float(row[metric]) for row in items if isinstance(row.get(metric), (int, float))]
+        if not values:
+            continue
+        value = sum(values) / len(values)
+        if best is None or value > best[1]:
+            best = (retriever, value)
+    return best
+
+
+def _rerank_analysis_note(rows: list[dict[str, Any]]) -> str:
+    rerank_rows = [row for row in rows if "rerank" in str(row.get("retriever_type") or "")]
+    if not rerank_rows:
+        return "No rerank retriever was included in this RAGAS run."
+    configured = []
+    for row in rerank_rows:
+        trace = row.get("trace") or {}
+        if isinstance(trace, dict) and trace.get("reranker_model"):
+            configured.append(str(trace["reranker_model"]))
+    if configured:
+        return f"Rerank retriever was included with reranker model(s): {', '.join(sorted(set(configured)))}."
+    return "Rerank retriever was included, but no `reranker_model` was recorded; it likely used the NoOp reranker path."
+
+
+def _trace_signals(row: dict[str, Any]) -> list[str]:
+    trace = row.get("trace") or {}
+    if not isinstance(trace, dict):
+        return []
+    signals: list[str] = []
+    if trace.get("answer_grounded") is False:
+        signals.append("answer_not_grounded")
+    if trace.get("answer_relevant") is False:
+        signals.append("answer_not_relevant")
+    if str(trace.get("final_decision") or "").strip().lower() == "insufficient_context":
+        signals.append("insufficient_context")
+    if trace.get("document_grade_decision") == "rewrite":
+        signals.append("document_rewrite")
+    return signals
 
 
 def _format_number(value: Any) -> str:

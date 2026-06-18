@@ -16,7 +16,7 @@ from llm_doc_rag_agent.utils import stable_hash # 给文档内容生成稳定哈
 class LocalDocumentLoader:
     """Load explicitly provided local technical documents."""
 
-    DEFAULT_EXTENSIONS = {".md", ".markdown", ".txt", ".py", ".ipynb", ".rst", ".pdf"}  # 默认允许入库的文件类型
+    DEFAULT_EXTENSIONS = {".md", ".markdown", ".txt", ".py", ".yaml", ".yml", ".ipynb", ".rst", ".pdf"}  # 默认允许入库的文件类型
     DEFAULT_IGNORE_PATTERNS = {                                                         # 默认忽略规则，忽略敏感文件和生成物缓存
         ".env",
         "*.env",

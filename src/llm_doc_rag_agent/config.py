@@ -124,7 +124,11 @@ def _normalize_yaml_keys(data: dict[str, Any]) -> dict[str, Any]:
         "llm_model": "llm_model",
         "llm_base_url": "llm_base_url",
     }
-    normalized = {aliases[k]: v for k, v in data.items() if k in aliases}   # 只保留白名单中的键，把 YAML key 转成内部字段名
+    normalized = {
+        aliases[k]: v
+        for k, v in data.items()
+        if k in aliases and not _is_empty_yaml_value(v)
+    }   # 只保留白名单中的键，把 YAML key 转成内部字段名
     if isinstance(normalized.get("eval_retrievers"), str):  # 判断这个 key 的 value 是否为 str
         normalized["eval_retrievers"] = [   # 把用逗号分隔的字符串转成列表
             item.strip()
@@ -141,6 +145,10 @@ def _normalize_yaml_keys(data: dict[str, Any]) -> dict[str, Any]:
         if key in normalized:
             normalized[key] = Path(normalized[key])
     return normalized   # 返回整理好的字典
+
+
+def _is_empty_yaml_value(value: Any) -> bool:
+    return value is None or (isinstance(value, str) and not value.strip())
 
 # 缓存配置对象，单例模式，全局只有一个 Settings 实例
 @lru_cache(maxsize=1)   # 装饰器，最多缓存 1 个结果，让下面的函数只执行一次，第一次调用时创建 Settings 并缓存，后续的调用都是直接返回缓存的同一个对象

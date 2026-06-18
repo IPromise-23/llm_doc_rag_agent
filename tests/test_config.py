@@ -3,6 +3,22 @@ from pathlib import Path
 from llm_doc_rag_agent.config import Settings
 
 
+def test_default_config_compares_all_core_retrievers():
+    settings = Settings().with_yaml(Path("configs/default.yaml"))
+
+    assert settings.eval_retrievers == ["dense", "bm25", "hybrid_rrf", "hybrid_rerank"]
+
+
+def test_empty_yaml_values_do_not_override_environment(monkeypatch, tmp_path: Path):
+    monkeypatch.setenv("RERANKER_MODEL", "cross-encoder/test")
+    config = tmp_path / "config.yaml"
+    config.write_text("reranker_model:\n", encoding="utf-8")
+
+    settings = Settings().with_yaml(config)
+
+    assert settings.reranker_model == "cross-encoder/test"
+
+
 def test_settings_load_retrieval_options_from_yaml(tmp_path: Path):
     config = tmp_path / "config.yaml"
     config.write_text(

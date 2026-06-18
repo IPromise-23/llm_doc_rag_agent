@@ -12,6 +12,9 @@ candidate_k:
 reranker_model:
 eval_retrievers:
   - dense
+  - bm25
+  - hybrid_rrf
+  - hybrid_rerank
 max_rewrites: 1
 min_relevance_score: 0.05
 min_relevant_chunks: 1

@@ -142,7 +142,7 @@ def eval_command(
     collection: Optional[str] = typer.Option(None, "--collection", "-c"),
     config: Optional[Path] = typer.Option(None, "--config"),
     top_k: Optional[int] = typer.Option(None, "--top-k"),
-    retrievers: Optional[list[str]] = typer.Option(None, "--retriever", help="Repeat for full RAG comparison, e.g. --retriever dense --retriever bm25."),    # 参数可以是一个字符串列表
+    retrievers: Optional[list[str]] = typer.Option(None, "--retriever", help="Repeat for full RAG comparison, e.g. --retriever dense --retriever bm25 --retriever hybrid_rrf --retriever hybrid_rerank."),    # 参数可以是一个字符串列表
     candidate_k: Optional[int] = typer.Option(None, "--candidate-k"),
     no_graph: bool = typer.Option(False, "--no-graph", help="Bypass LangGraph for all retrievers during this RAG eval."),
     report: Optional[Path] = typer.Option(None, "--report", help="Write a Markdown summary report. Defaults to output path with .md suffix."),
@@ -189,7 +189,7 @@ def eval_retrieval_command(
     collection: Optional[str] = typer.Option(None, "--collection", "-c"),
     config: Optional[Path] = typer.Option(None, "--config"),
     top_k: Optional[int] = typer.Option(None, "--top-k"),
-    retrievers: Optional[list[str]] = typer.Option(None, "--retriever", help="Repeat for retrieval-only comparison, e.g. --retriever dense --retriever hybrid_rrf."),
+    retrievers: Optional[list[str]] = typer.Option(None, "--retriever", help="Repeat for retrieval-only comparison, e.g. --retriever dense --retriever bm25 --retriever hybrid_rrf --retriever hybrid_rerank."),
     candidate_k: Optional[int] = typer.Option(None, "--candidate-k"),
     report: Optional[Path] = typer.Option(None, "--report", help="Write a Markdown retrieval summary report. Defaults to output path with .md suffix."),
 ) -> None:
@@ -216,7 +216,7 @@ def ragas_eval_command(
     collection: Optional[str] = typer.Option(None, "--collection", "-c"),
     config: Optional[Path] = typer.Option(None, "--config"),
     top_k: Optional[int] = typer.Option(None, "--top-k"),
-    retrievers: Optional[list[str]] = typer.Option(None, "--retriever", help="Repeat for comparison, e.g. --retriever dense --retriever hybrid_rrf."),
+    retrievers: Optional[list[str]] = typer.Option(None, "--retriever", help="Repeat for comparison, e.g. --retriever dense --retriever bm25 --retriever hybrid_rrf --retriever hybrid_rerank."),
     candidate_k: Optional[int] = typer.Option(None, "--candidate-k"),
     metrics: Optional[list[str]] = typer.Option(None, "--metric", help="Repeat to select RAGAS metrics."),  # --metric 可以重复传，多指标评估
     report: Optional[Path] = typer.Option(None, "--report", help="Write a Markdown RAGAS summary report."),
