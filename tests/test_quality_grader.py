@@ -82,7 +82,9 @@ def test_hybrid_quality_grader_uses_llm_document_indices():
 
 def test_hybrid_quality_grader_uses_llm_answer_grade():
     grader = HybridLLMQualityGrader(api_key="test", base_url="https://example.test", model="judge")
-    grader._client = _FakeClient(['{"grounded":false,"relevant":true,"reason":"unsupported"}'])
+    grader._client = _FakeClient(
+        ['{"grounded":false,"relevant":true,"decision":"regenerate","reason":"unsupported"}']
+    )
 
     grade = grader.grade_answer(
         question="How is collection configured?",
@@ -92,3 +94,22 @@ def test_hybrid_quality_grader_uses_llm_answer_grade():
 
     assert grade.grounded is False
     assert grade.relevant is True
+    assert grade.decision == "regenerate"
+    assert grade.reason == "unsupported"
+
+
+def test_hybrid_quality_grader_does_not_accept_conflicting_llm_answer_grade():
+    grader = HybridLLMQualityGrader(api_key="test", base_url="https://example.test", model="judge")
+    grader._client = _FakeClient(
+        ['{"grounded":false,"relevant":true,"decision":"accept","reason":"conflicting"}']
+    )
+
+    grade = grader.grade_answer(
+        question="How is collection configured?",
+        answer="Use an unsupported setting.",
+        contexts=["Qdrant collections require vector size and distance."],
+    )
+
+    assert grade.grounded is False
+    assert grade.relevant is True
+    assert grade.decision == "regenerate"

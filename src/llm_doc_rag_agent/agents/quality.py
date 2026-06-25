@@ -75,6 +75,8 @@ class AnswerGrade:                              # 生成答案质量
     answer_terms: list[str]
     context_terms: list[str]
     question_terms: list[str]                   # 这三个参数作为调试使用，描述规则判断时抽取了哪些有效 token
+    decision: str = "accept"                    # accept / regenerate / rewrite_query
+    reason: str = ""
 
 
 def meaningful_terms(text: str) -> list[str]:   # 文本 ---> 有意义的 token 列表
@@ -170,6 +172,15 @@ def grade_answer(
     insufficient_answer = any(phrase in answer for phrase in ("不足以回答", "无法回答", "insufficient"))    # 如果答案明确说上下文不足也视为一种合规的回答
     grounded = insufficient_answer or grounded_overlap >= min_grounded_overlap      # 如果答案承认不足 or 答案上下文重叠比例超过阈值，就认为 grounded
     relevant = insufficient_answer or not question_terms or question_overlap > 0    # 如果答案承认不足，或者问题没有有效词，或者答案至少覆盖了问题中的一些有效词，就认为 relevant
+    if grounded and relevant:
+        decision = "accept"
+        reason = "answer_grounded_and_relevant"
+    elif relevant:
+        decision = "regenerate"
+        reason = "answer_relevant_but_not_grounded"
+    else:
+        decision = "rewrite_query"
+        reason = "answer_not_relevant_to_question"
     return AnswerGrade(
         grounded=grounded,
         relevant=relevant,
@@ -178,6 +189,8 @@ def grade_answer(
         answer_terms=answer_terms,
         context_terms=context_terms,
         question_terms=question_terms,
+        decision=decision,
+        reason=reason,
     )
 
 

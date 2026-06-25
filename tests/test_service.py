@@ -27,14 +27,15 @@ class FakeQA:
     def __init__(self) -> None:
         self.calls = 0
 
-    def answer(self, question, retrieved):
+    def answer(self, question, retrieved, generation_feedback=None):
         self.calls += 1
         retriever_types = sorted({item.retriever_type for item in retrieved}) or ["unknown"]
+        contexts = [item.chunk.text for item in retrieved]
         return Answer(
             question=question,
-            answer="fake answer",
+            answer=contexts[0] if contexts else "fake answer",
             citations=[],
-            contexts=[item.chunk.text for item in retrieved],
+            contexts=contexts,
             trace={"model": "fake", "retriever_type": ",".join(retriever_types)},
         )
 
@@ -44,6 +45,7 @@ def _service(tmp_path: Path) -> RagService:
         LLM_DOC_RAG_PROJECT_ROOT=tmp_path,
         LLM_DOC_RAG_QDRANT_PATH=tmp_path / "qdrant",
         LLM_DOC_RAG_COLLECTION="test",
+        QUALITY_GRADER="rule",
     )
     service = RagService(settings=settings)
     service.embeddings = FakeEmbeddings()
@@ -121,7 +123,7 @@ def test_service_graph_retrieves_and_generates_for_normal_question(tmp_path: Pat
 
     answer = service.query("How does inspect collection work?", use_graph=True)
 
-    assert answer.answer == "fake answer"
+    assert "inspect collection command" in answer.answer
     assert answer.trace["route"] == "retrieve_rag"
     assert answer.trace["graph_path"] == [
         "route_question",

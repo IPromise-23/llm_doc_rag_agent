@@ -27,9 +27,16 @@ class FakeRetriever:
 class FakeQA:
     def __init__(self) -> None:
         self.calls = 0
+        self.feedback: list[str | None] = []
 
-    def answer(self, question: str, retrieved: list[RetrievedChunk]) -> Answer:
+    def answer(
+        self,
+        question: str,
+        retrieved: list[RetrievedChunk],
+        generation_feedback: str | None = None,
+    ) -> Answer:
         self.calls += 1
+        self.feedback.append(generation_feedback)
         contexts = [item.chunk.text for item in retrieved]
         return Answer(
             question=question,
@@ -45,6 +52,8 @@ class FakeQualityGrader:
 
     def __init__(self) -> None:
         self.rewrite_calls = 0
+        self.answer_decisions = ["accept"]
+        self.answer_grade_calls = 0
 
     def grade_documents(self, query, retrieved, min_relevance_score=0.05, min_relevant_chunks=1):
         from llm_doc_rag_agent.agents.quality import DocumentGrade
@@ -66,14 +75,21 @@ class FakeQualityGrader:
     def grade_answer(self, question, answer, contexts, min_grounded_overlap=0.2):
         from llm_doc_rag_agent.agents.quality import AnswerGrade
 
+        index = min(self.answer_grade_calls, len(self.answer_decisions) - 1)
+        decision = self.answer_decisions[index]
+        self.answer_grade_calls += 1
+        grounded = decision == "accept"
+        relevant = decision != "rewrite_query"
         return AnswerGrade(
-            grounded=True,
-            relevant=True,
-            grounded_overlap_ratio=1.0,
-            answer_question_overlap_ratio=1.0,
+            grounded=grounded,
+            relevant=relevant,
+            grounded_overlap_ratio=1.0 if grounded else 0.0,
+            answer_question_overlap_ratio=1.0 if relevant else 0.0,
             answer_terms=[],
             context_terms=[],
             question_terms=[],
+            decision=decision,
+            reason=f"fake_{decision}",
         )
 
 
@@ -147,3 +163,80 @@ def test_graph_uses_injected_quality_grader_for_rewrite_and_answer_grade():
     assert grader.rewrite_calls == 1
     assert answer.trace["quality_grader"] == "fake_quality"
     assert answer.trace["answer_grounded"] is True
+    assert answer.trace["generation_grade_decision"] == "accept"
+
+
+def test_graph_regenerates_when_generation_judge_requests_answer_retry():
+    retriever = FakeRetriever([[_retrieved("fake regenerated context")]])
+    qa = FakeQA()
+    grader = FakeQualityGrader()
+    grader.answer_decisions = ["regenerate", "accept"]
+    graph = build_rag_graph(
+        retriever,
+        qa,
+        quality_grader=grader,
+        max_rewrites=1,
+        max_generation_retries=1,
+    )
+
+    state = graph.invoke({"question": "Original question?", "top_k": 1})
+    answer = state["answer"]
+
+    assert retriever.queries == ["Original question?"]
+    assert qa.calls == 2
+    assert qa.feedback[0] is None
+    assert "fake_regenerate" in qa.feedback[1]
+    assert answer.trace["generation_retry_count"] == 1
+    assert answer.trace["generation_grade_decision"] == "accept"
+    assert answer.trace["final_decision"] == "generated"
+    assert answer.trace["graph_path"] == [
+        "route_question",
+        "retrieve",
+        "grade_documents",
+        "generate",
+        "grade_generation",
+        "regenerate_answer",
+        "generate",
+        "grade_generation",
+    ]
+
+
+def test_graph_rewrites_query_when_generation_judge_requests_new_retrieval():
+    retriever = FakeRetriever(
+        [
+            [_retrieved("first context")],
+            [_retrieved("fake rewritten context")],
+        ]
+    )
+    qa = FakeQA()
+    grader = FakeQualityGrader()
+    grader.answer_decisions = ["rewrite_query", "accept"]
+    graph = build_rag_graph(
+        retriever,
+        qa,
+        quality_grader=grader,
+        max_rewrites=1,
+        max_generation_retries=1,
+    )
+
+    state = graph.invoke({"question": "Original question?", "top_k": 1})
+    answer = state["answer"]
+
+    assert retriever.queries == ["Original question?", "fake rewritten query"]
+    assert grader.rewrite_calls == 1
+    assert qa.calls == 2
+    assert answer.trace["rewrite_count"] == 1
+    assert answer.trace["generation_grade_decision"] == "accept"
+    assert answer.trace["final_decision"] == "generated"
+    assert answer.trace["graph_path"] == [
+        "route_question",
+        "retrieve",
+        "grade_documents",
+        "generate",
+        "grade_generation",
+        "rewrite_query",
+        "retrieve",
+        "grade_documents",
+        "generate",
+        "grade_generation",
+    ]

@@ -16,9 +16,11 @@ eval_retrievers:
   - hybrid_rrf
   - hybrid_rerank
 max_rewrites: 1
+max_generation_retries: 1
 min_relevance_score: 0.05
 min_relevant_chunks: 1
 min_grounded_overlap: 0.2
+quality_grader: hybrid
 run_ragas: false
 ragas_metrics:
   - faithfulness

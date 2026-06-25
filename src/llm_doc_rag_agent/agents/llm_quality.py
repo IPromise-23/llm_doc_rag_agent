@@ -184,24 +184,35 @@ class HybridLLMQualityGrader(RuleBasedQualityGrader):
         payload = self._call_json(
             system=(
                 "You are a strict RAG answer judge. Return JSON only. "
-                "Judge whether the answer is grounded in the context and answers the question."
+                "Judge whether the answer is grounded in the context and answers the question. "
+                "Choose decision=accept only when the answer is both grounded and relevant. "
+                "Choose decision=regenerate when the retrieved context is enough but the answer should be rewritten. "
+                "Choose decision=rewrite_query when the context or search query is likely insufficient."
             ),
             user=(
-                'Return JSON shaped like {"grounded":true,"relevant":true,"reason":"..."}.\n\n'
+                'Return JSON shaped like {"grounded":true,"relevant":true,'
+                '"decision":"accept","reason":"..."}.\n'
+                'Allowed decisions: "accept", "regenerate", "rewrite_query".\n\n'
                 f"Question:\n{question}\n\nContext:\n{context}\n\nAnswer:\n{answer}"
             ),
         )
         if not payload:
             return fallback
 
+        grounded = self._coerce_bool(payload.get("grounded"), fallback.grounded)
+        relevant = self._coerce_bool(payload.get("relevant"), fallback.relevant)
+        decision = self._coerce_answer_decision(payload.get("decision"), grounded, relevant)
+        reason = str(payload.get("reason") or fallback.reason or "llm_answer_judge")
         return AnswerGrade(
-            grounded=self._coerce_bool(payload.get("grounded"), fallback.grounded),
-            relevant=self._coerce_bool(payload.get("relevant"), fallback.relevant),
+            grounded=grounded,
+            relevant=relevant,
             grounded_overlap_ratio=fallback.grounded_overlap_ratio,
             answer_question_overlap_ratio=fallback.answer_question_overlap_ratio,
             answer_terms=fallback.answer_terms,
             context_terms=fallback.context_terms,
             question_terms=fallback.question_terms,
+            decision=decision,
+            reason=reason,
         )
 
     def _call_json(self, system: str, user: str) -> dict[str, Any] | None:  # 调用 LLM 并解析 JSON
@@ -256,6 +267,31 @@ class HybridLLMQualityGrader(RuleBasedQualityGrader):
             if normalized in {"false", "no", "n"}:
                 return False
         return default  # default 是规则 fallback 的结果
+
+    @staticmethod
+    def _coerce_answer_decision(value: Any, grounded: bool, relevant: bool) -> str:
+        normalized = str(value or "").strip().lower()
+        aliases = {
+            "accept": "accept",
+            "pass": "accept",
+            "end": "accept",
+            "regenerate": "regenerate",
+            "rewrite_answer": "regenerate",
+            "retry_generation": "regenerate",
+            "rewrite_query": "rewrite_query",
+            "retrieve_again": "rewrite_query",
+            "reretrieve": "rewrite_query",
+        }
+        decision = aliases.get(normalized)
+        if decision:
+            if decision == "accept" and not (grounded and relevant):
+                return "regenerate" if relevant else "rewrite_query"
+            return decision
+        if grounded and relevant:
+            return "accept"
+        if relevant:
+            return "regenerate"
+        return "rewrite_query"
 
 
 def build_quality_grader(   # 根据配置创建评分器    工厂函数，外部不用自己判断要实例化哪个类，只要传 mode

@@ -66,14 +66,15 @@ python -m llm_doc_rag_agent.cli query \
 可以讲：
 
 - `retriever_type=hybrid_rrf` 同时利用 dense 和 BM25 候选。
-- LangGraph path 应包含 `route_question -> retrieve -> grade_documents -> generate -> grade_generation`。
+- LangGraph path 应包含 `route_question -> retrieve -> grade_documents -> generate -> grade_generation`，如果生成后 judge 不通过，后面还可能出现 `regenerate_answer` 或 `rewrite_query -> retrieve`。
 - `grade_documents` 会判断检索上下文是否足够相关。
-- `grade_generation` 会把 `answer_grounded`、`answer_relevant` 写入 trace，用于调试。
+- `grade_generation` 会把 `answer_grounded`、`answer_relevant`、`generation_grade_decision` 写入 trace，并决定是否结束、重答或重新检索。
 
 预期观察点：
 
 - `trace.route` 是 `retrieve_rag`。
 - `trace.graph_path` 包含 `grade_documents` 和 `grade_generation`。
+- `trace.generation_grade_decision=accept` 时才代表生成后质量门通过；如果是 `regenerate` 或 `rewrite_query`，继续看后续 graph path。
 - `citations` 里能看到 source path、chunk index、score 和 snippet。
 
 ## 场景 3：Source Lookup 或 Insufficient Context
@@ -103,7 +104,7 @@ PYTHONPATH=src python -m pytest tests/test_agents.py -q
 
 可以讲：
 
-- 单元测试覆盖了检索失败后 rewrite 一次再检索。
+- 单元测试覆盖了检索失败后 rewrite 一次再检索，也覆盖了生成后 judge 触发重答或重新检索。
 - 也覆盖了超过 rewrite 预算后返回 insufficient context，而不是让 LLM 强答。
 - 这个设计用于控制幻觉风险，符合 RAG Agent 的基本工程边界。
 
@@ -189,13 +190,10 @@ PYTHONPATH=src python -m llm_doc_rag_agent.cli eval-retrieval --help
 PYTHONPATH=src python -m llm_doc_rag_agent.cli eval --help
 ```
 
-最近一次验证结果：
+当前测试基线：
 
 ```text
-34 passed
-query --help 正常渲染
-eval-retrieval --help 正常渲染
-eval --help 正常渲染
+40 passed
 ```
 
 ## 演示时的注意事项
@@ -203,4 +201,4 @@ eval --help 正常渲染
 - 不展示 `.env`、API key、完整 prompt 或本机敏感路径。
 - 如果现场没有 API key，就展示 source lookup、CLI help、pytest 和已有文档说明。
 - 如果 embedding 模型首次运行需要下载，提前在本地缓存好模型，避免现场等待。
-- 不把规则型 CRAG/Self-RAG 说成企业级 judge；准确表达为“低成本、可测试、可解释的实践版自检策略”。
+- 不把 CRAG/Self-RAG 说成企业级 judge；准确表达为“hybrid LLM judge + 规则兜底的实践版质量门”。

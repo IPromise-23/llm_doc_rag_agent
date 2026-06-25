@@ -194,6 +194,7 @@ class RagService:
                 chunks_for_source=self.chunks_for_source,                   # 按某个源文件路径取回它的 chunks
                 quality_grader=self.quality_grader,
                 max_rewrites=self.settings.max_rewrites,
+                max_generation_retries=self.settings.max_generation_retries,
                 min_relevance_score=self.settings.min_relevance_score,
                 min_relevant_chunks=self.settings.min_relevant_chunks,
                 min_grounded_overlap=self.settings.min_grounded_overlap,

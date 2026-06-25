@@ -29,6 +29,7 @@ def test_settings_load_retrieval_options_from_yaml(tmp_path: Path):
                 "reranker_model: test-reranker",
                 "eval_retrievers: dense,bm25",
                 "max_rewrites: 2",
+                "max_generation_retries: 3",
                 "min_relevance_score: 0.2",
                 "min_relevant_chunks: 2",
                 "min_grounded_overlap: 0.3",
@@ -59,6 +60,7 @@ def test_settings_load_retrieval_options_from_yaml(tmp_path: Path):
     assert settings.reranker_model == "test-reranker"
     assert settings.eval_retrievers == ["dense", "bm25"]
     assert settings.max_rewrites == 2
+    assert settings.max_generation_retries == 3
     assert settings.min_relevance_score == 0.2
     assert settings.min_relevant_chunks == 2
     assert settings.min_grounded_overlap == 0.3

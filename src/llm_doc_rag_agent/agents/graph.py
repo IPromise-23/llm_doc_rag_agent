@@ -43,6 +43,8 @@ class RagGraphState(TypedDict, total=False):    # 图状态字典：LangGraph �
     retriever_type: str
     candidate_k: int | None
     rewrite_count: int
+    generation_retry_count: int
+    generation_feedback: str | None
     retrieved: list[RetrievedChunk]
     filtered_documents: list[RetrievedChunk]    # 质量判断后保留下来的 chunks
     generation: str                             # 生成出来的答案文本
@@ -50,6 +52,7 @@ class RagGraphState(TypedDict, total=False):    # 图状态字典：LangGraph �
     route: str                                  # 第一步路由结果
     decision: str
     document_decision: str                      # 文档质量判断结果
+    generation_decision: str                    # 生成后质量判断结果
     graph_path: list[str]                       # 记录走过哪些节点
     trace: dict[str, Any]                       # 调试黑匣子，记录路由、检索、评分、生成过程
     sources: list[str]
@@ -148,6 +151,7 @@ def build_rag_graph(
     chunks_for_source: SourceChunkGetter | None = None, # 对应 source_path 中有哪些 chunks 
     quality_grader: Any | None = None,
     max_rewrites: int = 1,
+    max_generation_retries: int = 1,
     min_relevance_score: float = 0.05,
     min_relevant_chunks: int = 1,
     min_grounded_overlap: float = 0.2,
@@ -164,6 +168,8 @@ def build_rag_graph(
             "decision": selected_route,                             # 对外调试/记录，告诉调试者这一步做出的决策是什么
             "search_query": state["question"],
             "rewrite_count": int(state.get("rewrite_count") or 0),
+            "generation_retry_count": int(state.get("generation_retry_count") or 0),
+            "generation_feedback": state.get("generation_feedback"),
             "graph_path": path,
             "trace": _merge_trace(                                  # 把需要更新的值放入到旧的 trace 中
                 state,                                              # state 时运行时控制流程用的，trace 是最终给调试、日志、前段展示的
@@ -171,6 +177,7 @@ def build_rag_graph(
                     "route": selected_route,
                     "decision": selected_route,
                     "graph_path": path,
+                    "generation_retry_count": int(state.get("generation_retry_count") or 0),
                 },
             ),
         }
@@ -284,15 +291,37 @@ def build_rag_graph(
         return {
             "search_query": rewritten,
             "rewrite_count": rewrite_count,
+            "generation_retry_count": 0,
+            "generation_feedback": None,
             "graph_path": path,
             "trace": _merge_trace(
                 state,
                 {
                     "graph_path": path,
                     "rewrite_count": rewrite_count,
+                    "generation_retry_count": 0,
+                    "generation_feedback": None,
                     "previous_query": previous_query,
                     "rewritten_query": rewritten,
                     "quality_grader": quality_grader_name,
+                },
+            ),
+        }
+
+    def prepare_regeneration(state: RagGraphState) -> dict[str, Any]:
+        path = _append_path(state, "regenerate_answer")
+        retry_count = int(state.get("generation_retry_count") or 0) + 1
+        feedback = _generation_feedback(state)
+        return {
+            "generation_retry_count": retry_count,
+            "generation_feedback": feedback,
+            "graph_path": path,
+            "trace": _merge_trace(
+                state,
+                {
+                    "graph_path": path,
+                    "generation_retry_count": retry_count,
+                    "generation_feedback": feedback,
                 },
             ),
         }
@@ -313,6 +342,7 @@ def build_rag_graph(
                     "final_decision": "insufficient_context",
                     "context_count": len(retrieved),
                     "max_rewrites": max_rewrites,
+                    "max_generation_retries": max_generation_retries,
                     "retrieval_skipped": False,
                 },
             ),
@@ -322,7 +352,8 @@ def build_rag_graph(
     def generate(state: RagGraphState) -> dict[str, Any]:
         path = _append_path(state, "generate")
         retrieved = state.get("filtered_documents") or state.get("retrieved", [])
-        answer = qa.answer(state["question"], retrieved)
+        feedback = state.get("generation_feedback")
+        answer = qa.answer(state["question"], retrieved, generation_feedback=feedback)
         trace = dict(answer.trace)
         trace.update(
             _merge_trace(
@@ -334,6 +365,8 @@ def build_rag_graph(
                     "candidate_k": state.get("candidate_k"),
                     "context_count": len(retrieved),
                     "search_query": state.get("search_query") or state["question"],
+                    "generation_retry_count": int(state.get("generation_retry_count") or 0),
+                    "generation_feedback": feedback,
                 },
             )
         )
@@ -367,6 +400,16 @@ def build_rag_graph(
                 contexts=answer.contexts,
                 min_grounded_overlap=min_grounded_overlap,
             )
+        requested_decision = _normalize_generation_decision(grade.decision)
+        generation_retry_count = int(state.get("generation_retry_count") or 0)
+        rewrite_count = int(state.get("rewrite_count") or 0)
+        if requested_decision == "regenerate" and generation_retry_count >= max_generation_retries:
+            routed_decision = "rewrite_query" if rewrite_count < max_rewrites else "insufficient_context"
+        elif requested_decision == "rewrite_query" and rewrite_count >= max_rewrites:
+            routed_decision = "insufficient_context"
+        else:
+            routed_decision = requested_decision
+        final_decision = "generated" if routed_decision == "accept" else routed_decision
         trace = dict(answer.trace)
         trace.update(
             _merge_trace(
@@ -378,7 +421,14 @@ def build_rag_graph(
                     "grounded_overlap_ratio": grade.grounded_overlap_ratio,
                     "answer_question_overlap_ratio": grade.answer_question_overlap_ratio,
                     "min_grounded_overlap": min_grounded_overlap,
-                    "final_decision": "generated",
+                    "generation_grade_decision": requested_decision,
+                    "generation_grade_routed_decision": routed_decision,
+                    "generation_grade_reason": grade.reason,
+                    "generation_retry_count": generation_retry_count,
+                    "max_generation_retries": max_generation_retries,
+                    "rewrite_count": rewrite_count,
+                    "max_rewrites": max_rewrites,
+                    "final_decision": final_decision,
                     "quality_grader": quality_grader_name,
                 },
             )
@@ -391,6 +441,7 @@ def build_rag_graph(
                 contexts=answer.contexts,
                 trace=trace,
             ),
+            "generation_decision": routed_decision,
             "graph_path": path,
             "trace": trace,
         }
@@ -405,6 +456,9 @@ def build_rag_graph(
             return "rewrite_query"
         return "insufficient_context"
 
+    def choose_after_generation_grade(state: RagGraphState) -> str:
+        return state.get("generation_decision") or "accept"
+
     workflow = StateGraph(RagGraphState)                                # 创建一张状态图
     workflow.add_node("route_question", route)                          # 添加节点，左边字符串是节点名，右边是实际执行的函数
     workflow.add_node("direct_answer", direct_answer)
@@ -412,6 +466,7 @@ def build_rag_graph(
     workflow.add_node("retrieve", retrieve)
     workflow.add_node("grade_documents", grade_documents)
     workflow.add_node("rewrite_query", rewrite_query)
+    workflow.add_node("regenerate_answer", prepare_regeneration)
     workflow.add_node("insufficient_context", insufficient_context)
     workflow.add_node("generate", generate)
     workflow.add_node("grade_generation", grade_generation)
@@ -438,9 +493,19 @@ def build_rag_graph(
         },
     )
     workflow.add_edge("rewrite_query", "retrieve")
+    workflow.add_edge("regenerate_answer", "generate")
     workflow.add_edge("insufficient_context", END)
     workflow.add_edge("generate", "grade_generation")
-    workflow.add_edge("grade_generation", END)
+    workflow.add_conditional_edges(
+        "grade_generation",
+        choose_after_generation_grade,
+        {
+            "accept": END,
+            "regenerate": "regenerate_answer",
+            "rewrite_query": "rewrite_query",
+            "insufficient_context": "insufficient_context",
+        },
+    )
     return workflow.compile()   # 将图编译成可执行的对象
 
 
@@ -627,6 +692,37 @@ def _citations_from_retrieved(retrieved: list[RetrievedChunk]) -> list[Citation]
 
 def _merge_trace(state: RagGraphState, update: dict[str, Any]) -> dict[str, Any]:   # 把 旧 trace 与 新 trace 合并
     return {**dict(state.get("trace") or {}), **update}     # ** 在 dict 中表示展开 dict
+
+
+def _normalize_generation_decision(value: str | None) -> str:
+    normalized = str(value or "").strip().lower()
+    aliases = {
+        "accept": "accept",
+        "generated": "accept",
+        "end": "accept",
+        "regenerate": "regenerate",
+        "rewrite_answer": "regenerate",
+        "retry_generation": "regenerate",
+        "rewrite_query": "rewrite_query",
+        "retrieve_again": "rewrite_query",
+        "reretrieve": "rewrite_query",
+        "insufficient_context": "insufficient_context",
+    }
+    return aliases.get(normalized, "rewrite_query")
+
+
+def _generation_feedback(state: RagGraphState) -> str:
+    trace = dict(state.get("trace") or {})
+    parts = []
+    reason = str(trace.get("generation_grade_reason") or "").strip()
+    if reason:
+        parts.append(reason)
+    grounded = trace.get("answer_grounded")
+    relevant = trace.get("answer_relevant")
+    parts.append(f"grounded={grounded}, relevant={relevant}")
+    parts.append("The previous answer did not pass the generation quality gate.")
+    parts.append("Use only the retrieved context, answer the original question directly, and avoid unsupported claims.")
+    return " ".join(parts)
 
 
 def _looks_like_source_hint(value: str) -> bool:    # 判断一个字符串是否像文件路径

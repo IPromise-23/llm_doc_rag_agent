@@ -83,14 +83,15 @@ MVP 基线能力：
 - RAG 分支：普通问题走 `retrieve -> grade_documents -> generate -> grade_generation`，并在 answer trace 中返回 `route`、`graph_path`、`retriever_type`、`candidate_k`、`top_k`。
 - CRAG 节点：已增加规则型 `grade_documents`，根据 query terms、retriever score 和最少相关 chunk 数判断是否接受上下文。
 - Query rewrite：当没有足够相关上下文且未超过 `max_rewrites` 时，进入 `rewrite_query` 并重试检索；超过预算后返回 insufficient context，不调用 LLM 强答。
-- Self-RAG trace：已增加规则型 `grade_generation`，记录 `answer_grounded`、`answer_relevant`、grounded overlap 和 answer-question overlap。
-- 循环控制：已在配置中加入 `max_rewrites`、`min_relevance_score`、`min_relevant_chunks`、`min_grounded_overlap`。
+- Self-RAG judge：`grade_generation` 会判断答案是否 grounded/relevant，并输出 `accept/regenerate/rewrite_query` 决策；合格才结束，不合格会先重答或回到 `rewrite_query -> retrieve -> grade_documents`。
+- LLM-as-judge：运行时默认 `quality_grader=hybrid`，配置 API key 时用 OpenAI-compatible LLM 判断文档相关性、答案质量和后续动作；无 key 或调用失败时使用规则兜底，保证本地测试可复现。
+- 循环控制：已在配置中加入 `max_rewrites`、`max_generation_retries`、`min_relevance_score`、`min_relevant_chunks`、`min_grounded_overlap`。
 - Service 集成：`RagService.query(..., use_graph=True)` 统一进入 graph；非 source lookup 的检索由配置好的 retriever adapter 执行。
-- 测试：已覆盖 source lookup 不触发 embedding/LLM、普通问题触发 retrieve/grade/generate、source chunks inspect、路由规则、source hint 提取、rewrite retry 和 insufficient context 分支。
+- 测试：已覆盖 source lookup 不触发 embedding/LLM、普通问题触发 retrieve/grade/generate、source chunks inspect、路由规则、source hint 提取、rewrite retry、generation retry、generation-triggered reretrieval 和 insufficient context 分支。
 
 当前边界：
 
-- `grade_documents` 和 `grade_generation` 运行时默认仍是规则型实现，适合项目复盘和本地调试；离线评估已增加 `ragas-eval`，可用 DeepSeek/OpenAI-compatible judge 计算 RAGAS 指标。
+- `grade_documents` 和 `grade_generation` 已支持 hybrid LLM judge，但 judge prompt 仍是轻量实践版；离线评估已增加 `ragas-eval`，可用 DeepSeek/OpenAI-compatible judge 计算 RAGAS 指标。
 - Source summarize：当用户问“某个文件讲了什么”时，当前只返回 chunk 摘要列表；后续可增加一个显式 summarization 节点，并把是否调用 LLM 写入 trace。
 - Trace 输出能解释 graph path 和关键判定，但还不是完整的生产级观测系统。
 
@@ -100,6 +101,7 @@ MVP 基线能力：
 - 普通问题的 trace 能解释这次走了哪条 graph path。
 - 检索失败时能自动改写问题并重试一次。
 - 超过改写预算仍没有上下文时，返回“不足以回答”，而不是强答。
+- 生成后只有 `grade_generation` 判定 `accept` 才能结束；否则按预算进入 `regenerate_answer` 或重新检索。
 
 ## v0.5：API 服务化与前端展示
 

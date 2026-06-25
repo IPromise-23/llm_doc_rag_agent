@@ -40,10 +40,11 @@ class Settings(BaseSettings):   # BaseSettings 可以让 Pydantic 自动读取 .
     reranker_device: str = Field(default="cpu",alias="RERANKER_DEVICE")
     eval_retrievers: list[str] = Field(default_factory=lambda: ["dense"], alias="EVAL_RETRIEVERS")
     max_rewrites: int = Field(default=1, alias="MAX_REWRITES")
+    max_generation_retries: int = Field(default=1, alias="MAX_GENERATION_RETRIES")
     min_relevance_score: float = Field(default=0.05, alias="MIN_RELEVANCE_SCORE")
     min_relevant_chunks: int = Field(default=1, alias="MIN_RELEVANT_CHUNKS")
     min_grounded_overlap: float = Field(default=0.2, alias="MIN_GROUNDED_OVERLAP")
-    quality_grader: str = Field(default="rule", alias="QUALITY_GRADER")
+    quality_grader: str = Field(default="hybrid", alias="QUALITY_GRADER")
     quality_model: str | None = Field(default=None, alias="QUALITY_MODEL")
     quality_base_url: str | None = Field(default=None, alias="QUALITY_BASE_URL")
     quality_api_key: str | None = Field(default=None, alias="QUALITY_API_KEY")
@@ -103,6 +104,7 @@ def _normalize_yaml_keys(data: dict[str, Any]) -> dict[str, Any]:
         "reranker_device": "reranker_device",
         "eval_retrievers": "eval_retrievers",
         "max_rewrites": "max_rewrites",
+        "max_generation_retries": "max_generation_retries",
         "min_relevance_score": "min_relevance_score",
         "min_relevant_chunks": "min_relevant_chunks",
         "min_grounded_overlap": "min_grounded_overlap",

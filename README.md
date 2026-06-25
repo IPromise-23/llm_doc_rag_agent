@@ -3,10 +3,10 @@
 `llm_doc_rag_agent` 是一个面向本地技术文档的 RAG Agent 项目。它把 [`rag-from-scratch`](https://github.com/langchain-ai/rag-from-scratch)、[`qdrant-rag-eval`](https://github.com/qdrant/qdrant-rag-eval)、[`langgraph`](https://github.com/langchain-ai/langgraph) 中的主链路整理成可复用的工程代码：
 
 ```text
-本地文档 -> 加载 -> 切块 -> Embedding -> Qdrant -> LangGraph 路由 -> 检索/来源查询 -> CRAG 自检 -> 生成 -> Self-RAG Trace -> 评估
+本地文档 -> 加载 -> 切块 -> Embedding -> Qdrant -> LangGraph 路由 -> 检索/来源查询 -> CRAG 自检 -> 生成 -> Self-RAG Judge -> 评估
 ```
 
-当前工程能力已推进到 `v0.4-practice`：`v0.2` 的工程化索引、`v0.3` 的 hybrid retrieval/eval、`v0.4` 的 LangGraph 路由与规则型 CRAG/Self-RAG 自检已落地。包版本号仍保持 `0.1.0`，后续发布时再单独调整。
+当前工程能力已推进到 `v0.4-practice`：`v0.2` 的工程化索引、`v0.3` 的 hybrid retrieval/eval、`v0.4` 的 LangGraph 路由与 CRAG/Self-RAG 自检闭环已落地。包版本号仍保持 `0.1.0`，后续发布时再单独调整。
 
 ## 当前能力
 
@@ -18,9 +18,9 @@
 - 索引管理：支持未变化 source 跳过、source 删除、source 重建和 collection inspect。
 - 检索：支持 dense、轻量 BM25、hybrid RRF 检索。
 - 生成：使用 OpenAI-compatible Chat Completions 接口，默认面向 DeepSeek 配置。
-- 编排：LangGraph 先路由到 `source_lookup`、`direct_answer` 或 `retrieve_rag`；普通问题走 `retrieve -> grade_documents -> generate -> grade_generation`。
-- Agent 自检：规则型 CRAG gate 会判断检索上下文是否足够相关，必要时改写 query 并重试；规则型 Self-RAG trace 会记录答案 groundedness/relevance。
-- Trace：query 返回 `route`、`graph_path`、`retriever_type`、`candidate_k`、`document_grade_decision`、`answer_grounded` 等调试字段。
+- 编排：LangGraph 先路由到 `source_lookup`、`direct_answer` 或 `retrieve_rag`；普通问题走 `retrieve -> grade_documents -> generate -> grade_generation`，生成后再决定结束、重答或重新检索。
+- Agent 自检：CRAG gate 会判断检索上下文是否足够相关，必要时改写 query 并重试；Self-RAG judge 会判断答案 groundedness/relevance，并在不合格时触发 `regenerate_answer` 或 `rewrite_query`。
+- Trace：query 返回 `route`、`graph_path`、`retriever_type`、`candidate_k`、`document_grade_decision`、`generation_grade_decision`、`answer_grounded` 等调试字段。
 - 入口：提供 CLI、可选 FastAPI、三层 CSV/JSONL eval runner。
 
 ## 目录结构
@@ -181,8 +181,8 @@ python -m llm_doc_rag_agent.cli eval \
 这些能力目前还没有完全工程化，后续版本会优先补齐：
 
 - 当前 BM25/hybrid 基于已有 chunk payload 临时计算，还没有 Qdrant named sparse vectors 和持久化 sparse 索引。
-- Reranker 已有可插拔策略入口；默认未配置 `reranker_model` 时不会加载 CrossEncoder，`dense_rerank` / `hybrid_rerank` 会走 NoOp reranker，因此只能验证候选集路径，不能代表真实 rerank 收益。
-- CRAG/Self-RAG 运行时 gate 默认仍是规则型轻量实现；离线评估已提供 `ragas-eval`，会复用 DeepSeek/OpenAI-compatible judge，并默认关闭 DeepSeek thinking。
+- Reranker 已有可插拔策略入口；默认未配置 `reranker_model` 时不会加载 CrossEncoder，`dense_rerank` / `hybrid_rerank` 会走 NoOp reranker，只做候选截断和候选集路径验证，不能代表真实 rerank 收益。
+- CRAG/Self-RAG 运行时 gate 默认使用 hybrid judge：配置了 API key 时调用 OpenAI-compatible LLM 判断文档相关性、答案 groundedness/relevance 和后续动作；无 key 或调用失败时回退到规则实现。离线评估已提供 `ragas-eval`，会复用 DeepSeek/OpenAI-compatible judge，并默认关闭 DeepSeek thinking。
 - Eval 已拆成三层：`eval-retrieval` 负责不调用 LLM 的检索命中评估，`eval` 负责完整 RAG/Graph 答案评估，`ragas-eval` 负责离线自动质量指标。RAGAS 运行前需要 dataset 提供 `ground_truth`。
 - API 已有项目根目录路径限制和统一错误响应雏形，但 request id、streaming 和 collection 管理还未补齐。
 - 项目有核心单元测试和 GitHub Actions 测试工作流，但还没有结构化日志、成本统计和完整前端。
@@ -196,7 +196,7 @@ python -m llm_doc_rag_agent.cli eval \
 | `v0.1` | MVP 主链路 | loader、splitter、embedding、Qdrant、dense retrieval、QA、CLI、eval、最小 LangGraph |
 | `v0.2` | 工程化索引与基础评估 | 增量索引、source 删除/重建、Qdrant 分页、实验输出、CLI 增强、安全忽略 |
 | `v0.3` | Hybrid Retrieval 与 Reranker | 已有轻量 BM25、hybrid RRF、检索配置、多策略 eval、可选 reranker 入口；后续补 sparse vectors 和真实 reranker 验证 |
-| `v0.4` | Self-RAG / Adaptive RAG Agent | 已有 `source_lookup/direct_answer/retrieve_rag` 路由、规则型 `grade_documents`、query rewrite、`grade_generation` 和 trace |
+| `v0.4` | Self-RAG / Adaptive RAG Agent | 已有 `source_lookup/direct_answer/retrieve_rag` 路由、CRAG query rewrite、LLM/hybrid `grade_generation`、答案重试和重新检索闭环 |
 | `v0.5` | API 服务化与前端展示 | 统一 API 错误、request id、streaming、collection 管理、轻量 UI |
 | `v0.6` | 合规、观测与发布质量 | `.ragignore`、日志、成本统计、测试、CI、故障排查文档 |
 

@@ -21,9 +21,14 @@ class QAService:
             self._client = OpenAI(api_key=self.api_key, base_url=self.base_url)
         return self._client
 
-    def answer(self, question: str, retrieved: list[RetrievedChunk]) -> Answer:
+    def answer(
+        self,
+        question: str,
+        retrieved: list[RetrievedChunk],
+        generation_feedback: str | None = None,
+    ) -> Answer:
         contexts = [item.chunk.text for item in retrieved]
-        prompt = self._build_prompt(question, retrieved)
+        prompt = self._build_prompt(question, retrieved, generation_feedback=generation_feedback)
         response = self.client.chat.completions.create(
             model=self.model,
             messages=[
@@ -59,10 +64,16 @@ class QAService:
                 "model": self.model,
                 "retriever_type": ",".join(retriever_types),
                 "context_count": len(contexts),
+                "generation_feedback": generation_feedback,
             },
         )
 
-    def _build_prompt(self, question: str, retrieved: list[RetrievedChunk]) -> str: # 建立提示词 
+    def _build_prompt(
+        self,
+        question: str,
+        retrieved: list[RetrievedChunk],
+        generation_feedback: str | None = None,
+    ) -> str: # 建立提示词 
         context_blocks = []
         for index, item in enumerate(retrieved, start=1):   # index 是从 1 开始的数字   item 是 RetrievedChunk 的实例对象
             chunk = item.chunk
@@ -70,10 +81,17 @@ class QAService:
                 f"[{index}] source={chunk.source_path} chunk={chunk.chunk_index} score={item.score:.4f}\n{chunk.text}"
             )
         context = "\n\n".join(context_blocks) if context_blocks else "(no context retrieved)"
+        feedback_block = (
+            f"\nPrevious answer quality feedback:\n{generation_feedback}\n"
+            "Revise the answer to address this feedback while staying within the context.\n"
+            if generation_feedback
+            else ""
+        )
         return (
             "Use the following document chunks to answer the question.\n"
             "Cite sources by mentioning their source path and chunk number when useful.\n\n"
             f"Question:\n{question}\n\n"
             f"Context:\n{context}\n\n"
+            f"{feedback_block}"
             "Answer:"
         )
