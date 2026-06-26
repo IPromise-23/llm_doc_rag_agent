@@ -120,7 +120,7 @@ class RagService:
             )
         return self._quality_grader
 
-    def ingest_path(self, path: str | Path, recreate: bool = False, batch_size: int = 64) -> dict[str, Any]:    # 把本地文件或者目录入库
+    def ingest_path(self, path: str | Path, recreate: bool = False, batch_size: int = 64) -> dict[str, Any]:    # 把本地文件或者目录入库    # 增量索引，每次 ingest 只处理新增或发生变化的文档；按照源文件 source 级别实现的，并非按照单个 chunk 级别实现
         documents = self.loader.load_path(path)     # 加载文档，得到 Docunment 列表
         if not documents:
             return {
@@ -259,3 +259,9 @@ class RagService:
     def close(self) -> None:
         if self._store is not None:
             self._store.close()
+
+"""
+增量索引是基于 source_path + document_hash 做的 source 级增量更新。
+每次 ingest 时先比较当前文档 hash 和 Qdrant 中已保存的 hash；没变就跳过，变了就删除该 source 的旧 chunks 并重新切块、embedding、upsert。
+它避免了每次都重建整个索引，节省 embedding 成本和时间。
+"""
